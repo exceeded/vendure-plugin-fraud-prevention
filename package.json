@@ -1,0 +1,59 @@
+{
+  "name": "@huloglobal/vendure-plugin-fraud-prevention",
+  "version": "0.1.0",
+  "description": "Full fraud-prevention suite for Vendure: signal-based risk scoring (velocity, disposable emails, block/allow lists, CIDR ranges, high-risk countries, failed-payment patterns), real server-side enforcement with monitor/enforce modes, a manual review queue with approve/reject workflow, public threat-feed sync (FireHOL, Spamhaus DROP, Tor exits, disposable-email domains), and a multi-tab admin dashboard.",
+  "license": "AGPL-3.0-or-later",
+  "author": "Wayne Garrison <wayne@garrison.me.uk>",
+  "homepage": "https://github.com/exceeded/vendure-plugin-fraud-prevention",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/exceeded/vendure-plugin-fraud-prevention.git"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "ui",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "logo.svg",
+    "hulo-global-logo.svg"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "yarn build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@huloglobal/vendure-licence-sdk": "^0.6.0"
+  },
+  "peerDependencies": {
+    "@vendure/core": ">=3.5.0 <4.0.0",
+    "@nestjs/common": ">=10.0.0",
+    "@nestjs/schedule": ">=3.0.0",
+    "nodemailer": ">=6.0.0",
+    "typeorm": ">=0.3.0"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^10.0.0",
+    "@nestjs/schedule": "^4.0.0",
+    "@types/node": "^20.0.0",
+    "@types/nodemailer": "^6.4.0",
+    "@vendure/core": "^3.7.0",
+    "nodemailer": "^6.9.0",
+    "typescript": "^5.3.0",
+    "vitest": "^2.0.0"
+  },
+  "keywords": [
+    "vendure",
+    "vendure-plugin",
+    "fraud",
+    "fraud-prevention",
+    "risk-scoring",
+    "chargeback",
+    "velocity-limits",
+    "blocklist"
+  ]
+}

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="HULO Global">
+  <title>HULO Global</title>
+  <!-- Shared HULO frame: rounded 14px navy square. Everything below
+       is the HG monogram tuned so both letters read cleanly at 20px
+       favicon size without ligature ambiguity. -->
+  <rect width="64" height="64" rx="14" fill="#0f1419"/>
+
+  <!-- H — two verticals + a crossbar. Kept slim (5px stroke on 64px
+       viewport) so the counter-space between letters stays legible. -->
+  <path d="M14 16 h5 v13 h11 v-13 h5 v32 h-5 v-14 h-11 v14 h-5 z"
+        fill="#ffffff"/>
+
+  <!-- G — a rounded arc that reads as an incomplete circle plus the
+       amber tick that closes it off. The tick is the HULO accent
+       colour so the mark carries brand pigment even at tiny sizes. -->
+  <path d="M50 24
+           A11 11 0 1 0 50 42
+           L50 34
+           L44 34
+           L44 30"
+        fill="none" stroke="#ffffff" stroke-width="4.5"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Amber accent tick — closes the G bowl and provides the brand
+       colour anchor. Drawn last so it lays on top. -->
+  <circle cx="50" cy="33" r="2.5" fill="#f59e0b"/>
+</svg>
