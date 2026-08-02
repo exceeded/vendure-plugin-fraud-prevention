@@ -711,21 +711,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                         </div>
                                         <ng-container *ngSwitchCase="'telegram'">
                                             <div class="form-row">
-                                                <label>Bot token <small>(from <small>(from @BotFather)</small>#64;BotFather)</small></label>
-                                                <input class="form-input mono" [(ngModel)]="notif.telegramBotToken" (ngModelChange)="notifDirty = true" placeholder="123456:ABC-…">
-                                            </div>
-                                            <div class="form-row">
-                                                <label>Chat ID</label>
-                                                <input class="form-input mono" [(ngModel)]="notif.telegramChatId" (ngModelChange)="notifDirty = true" placeholder="-1001234567890">
-                                            </div>
-                                        </ng-container>
-                                        <ng-container *ngSwitchCase="'webhook'">
-                                            <div class="form-row">
-                                                <label>URL <small>(receives a JSON POST per event)</small></label>
-                                                <input class="form-input" [(ngModel)]="notif.genericWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://your-system/hooks/fraud">
-                                            </div>
-                                            <div class="form-row">
-                                                <label>Signing secret <small>(optional — HMAC-SHA256 in X-Hulo-Signature)</small></label>
+                                                <label>Bot token <small>(from &#64;BotFather)</small></label>
                                                 <input class="form-input mono" [(ngModel)]="notif.genericWebhookSecret" (ngModelChange)="notifDirty = true" placeholder="optional">
                                             </div>
                                         </ng-container>

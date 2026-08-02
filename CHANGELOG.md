@@ -5,6 +5,14 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] — 2026-08-02
+
+### Fixed
+- 0.3.2's `&#64;` escape was corrupted by the release tooling (sed `&`
+  back-reference) and still shipped a bare `@` — admin builds kept
+  failing. Repaired and verified: no bare `@` remains in any template
+  text node.
+
 ## [0.3.2] — 2026-08-02
 
 ### Fixed
