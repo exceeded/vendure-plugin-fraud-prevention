@@ -5,6 +5,18 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-08-02
+
+### Changed
+- **Rules tab simplified.** New Protection level presets — Relaxed /
+  Balanced (recommended) / Strict — set thresholds and velocity limits
+  in one click; every numeric field now lives behind an Advanced
+  settings toggle. Editing any value flips the level to Custom.
+- **Notifications redesigned** as an integrations list: one row per
+  channel (Email, Slack, Discord, Teams, Telegram, Webhook) with a
+  connected-status dot, expanding in place to its few fields — instead
+  of seven URL inputs spread across the page.
+
 ## [0.3.0] — 2026-08-02
 
 ### Added

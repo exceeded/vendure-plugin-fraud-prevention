@@ -268,6 +268,34 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
             <vdr-page-block>
                 <div class="card">
                     <div class="card-block">
+                        <h3 class="step-title">Protection level</h3>
+                        <p class="hint">One click sets thresholds and velocity limits to a sensible bundle. Fine-tune anything under Advanced — the level shows as Custom once you do.</p>
+                        <div class="mode-grid">
+                            <label class="mode-card" *ngFor="let p of presets" [class.active]="activePreset() === p.key">
+                                <input type="radio" name="preset" [value]="p.key" [checked]="activePreset() === p.key" (change)="applyPreset(p.key)">
+                                <div class="mode-title">{{ p.label }} <span class="mini-chip" *ngIf="p.key === 'balanced'">recommended</span></div>
+                                <div class="mode-body">{{ p.description }}</div>
+                            </label>
+                        </div>
+                        <p class="hint" *ngIf="activePreset() === 'custom'" style="margin-top:8px">Currently: <strong>Custom</strong> — your own values (see Advanced below).</p>
+                    </div>
+                </div>
+            </vdr-page-block>
+
+            <vdr-page-block>
+                <div class="card">
+                    <div class="card-block">
+                        <button class="gbtn gbtn-outline" (click)="advancedOpen = !advancedOpen" [attr.aria-expanded]="advancedOpen">
+                            {{ advancedOpen ? '▾ Hide advanced settings' : '▸ Advanced settings' }}
+                        </button>
+                        <p class="hint inline" style="margin-left:10px">thresholds, velocity limits, signals, review workflow</p>
+                    </div>
+                </div>
+            </vdr-page-block>
+
+            <vdr-page-block *ngIf="advancedOpen">
+                <div class="card">
+                    <div class="card-block">
                         <h3 class="step-title">Risk thresholds</h3>
                         <p class="hint">Each fired signal adds points (see the exact contributions in Simulate). Totals at or above these values change what happens to the order.</p>
                         <div class="form-grid">
@@ -306,7 +334,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                 </div>
             </vdr-page-block>
 
-            <vdr-page-block>
+            <vdr-page-block *ngIf="advancedOpen">
                 <div class="card">
                     <div class="card-block">
                         <h3 class="step-title">Velocity limits</h3>
@@ -340,7 +368,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                 </div>
             </vdr-page-block>
 
-            <vdr-page-block>
+            <vdr-page-block *ngIf="advancedOpen">
                 <div class="card">
                     <div class="card-block">
                         <h3 class="step-title">Signals</h3>
@@ -645,49 +673,64 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                 <div class="card">
                     <div class="card-block">
                         <h3 class="step-title">Notifications</h3>
-                        <p class="hint" *ngIf="notif">
-                            SMTP: <strong>{{ notif.smtpConfigured ? '✓ configured' : '✗ not configured — set SMTP_SERVER / SMTP_USER env vars' }}</strong>
-                        </p>
-                        <div class="form-row" *ngIf="notif">
-                            <label>Admin alert email</label>
-                            <input class="form-input" [(ngModel)]="notif.adminEmail" (ngModelChange)="notifDirty = true" placeholder="you@company.com">
-                        </div>
-                        <h4 class="subsection-title" *ngIf="notif">Ops channels — every held / approved / rejected case pings all configured</h4>
-                        <div class="form-grid" *ngIf="notif">
-                            <div class="form-row">
-                                <label>Slack webhook</label>
-                                <input class="form-input" [(ngModel)]="notif.slackWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://hooks.slack.com/services/…">
+                        <p class="hint">Where alerts go when an order is held, approved or rejected. Connect as many channels as you like — every event pings all of them.</p>
+                        <div class="integrations" *ngIf="notif">
+                            <div class="integ-row" *ngFor="let ch of integrationDefs()">
+                                <button class="integ-head" (click)="integOpen = integOpen === ch.key ? '' : ch.key" [attr.aria-expanded]="integOpen === ch.key">
+                                    <span class="integ-icon" aria-hidden="true">{{ ch.icon }}</span>
+                                    <span class="integ-name">{{ ch.name }}</span>
+                                    <span class="integ-desc">{{ ch.description }}</span>
+                                    <span class="status-dot" [class.on]="ch.configured()" aria-hidden="true"></span>
+                                    <span class="integ-state">{{ ch.configured() ? 'Connected' : 'Off' }}</span>
+                                    <span class="integ-chev" aria-hidden="true">{{ integOpen === ch.key ? '▾' : '▸' }}</span>
+                                </button>
+                                <div class="integ-body" *ngIf="integOpen === ch.key">
+                                    <ng-container [ngSwitch]="ch.key">
+                                        <ng-container *ngSwitchCase="'email'">
+                                            <p class="hint">SMTP: <strong>{{ notif.smtpConfigured ? '✓ configured on the server' : '✗ not configured — set SMTP_SERVER / SMTP_USER env vars' }}</strong></p>
+                                            <div class="form-row">
+                                                <label>Send alerts to</label>
+                                                <input class="form-input" [(ngModel)]="notif.adminEmail" (ngModelChange)="notifDirty = true" placeholder="you@company.com">
+                                            </div>
+                                            <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnBlocked" (ngModelChange)="notifDirty = true"> Alert me on blocked-level holds</label>
+                                            <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnHighRisk" (ngModelChange)="notifDirty = true"> Alert me on review-level holds</label>
+                                            <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnApproval" (ngModelChange)="notifDirty = true"> Email the customer when I approve their order</label>
+                                        </ng-container>
+                                        <div class="form-row" *ngSwitchCase="'slack'">
+                                            <label>Incoming webhook URL</label>
+                                            <input class="form-input" [(ngModel)]="notif.slackWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://hooks.slack.com/services/…">
+                                        </div>
+                                        <div class="form-row" *ngSwitchCase="'discord'">
+                                            <label>Channel webhook URL</label>
+                                            <input class="form-input" [(ngModel)]="notif.discordWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://discord.com/api/webhooks/…">
+                                        </div>
+                                        <div class="form-row" *ngSwitchCase="'teams'">
+                                            <label>Incoming webhook URL</label>
+                                            <input class="form-input" [(ngModel)]="notif.teamsWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://….webhook.office.com/…">
+                                        </div>
+                                        <ng-container *ngSwitchCase="'telegram'">
+                                            <div class="form-row">
+                                                <label>Bot token <small>(from @BotFather)</small></label>
+                                                <input class="form-input mono" [(ngModel)]="notif.telegramBotToken" (ngModelChange)="notifDirty = true" placeholder="123456:ABC-…">
+                                            </div>
+                                            <div class="form-row">
+                                                <label>Chat ID</label>
+                                                <input class="form-input mono" [(ngModel)]="notif.telegramChatId" (ngModelChange)="notifDirty = true" placeholder="-1001234567890">
+                                            </div>
+                                        </ng-container>
+                                        <ng-container *ngSwitchCase="'webhook'">
+                                            <div class="form-row">
+                                                <label>URL <small>(receives a JSON POST per event)</small></label>
+                                                <input class="form-input" [(ngModel)]="notif.genericWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://your-system/hooks/fraud">
+                                            </div>
+                                            <div class="form-row">
+                                                <label>Signing secret <small>(optional — HMAC-SHA256 in X-Hulo-Signature)</small></label>
+                                                <input class="form-input mono" [(ngModel)]="notif.genericWebhookSecret" (ngModelChange)="notifDirty = true" placeholder="optional">
+                                            </div>
+                                        </ng-container>
+                                    </ng-container>
+                                </div>
                             </div>
-                            <div class="form-row">
-                                <label>Discord webhook</label>
-                                <input class="form-input" [(ngModel)]="notif.discordWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://discord.com/api/webhooks/…">
-                            </div>
-                            <div class="form-row">
-                                <label>Microsoft Teams webhook</label>
-                                <input class="form-input" [(ngModel)]="notif.teamsWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://….webhook.office.com/…">
-                            </div>
-                            <div class="form-row">
-                                <label>Telegram bot token</label>
-                                <input class="form-input mono" [(ngModel)]="notif.telegramBotToken" (ngModelChange)="notifDirty = true" placeholder="123456:ABC-…">
-                            </div>
-                            <div class="form-row">
-                                <label>Telegram chat ID</label>
-                                <input class="form-input mono" [(ngModel)]="notif.telegramChatId" (ngModelChange)="notifDirty = true" placeholder="-1001234567890">
-                            </div>
-                            <div class="form-row">
-                                <label>Generic webhook URL <small>(JSON POST)</small></label>
-                                <input class="form-input" [(ngModel)]="notif.genericWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://your-system/hooks/fraud">
-                            </div>
-                            <div class="form-row">
-                                <label>Webhook signing secret <small>(HMAC-SHA256 → X-Hulo-Signature)</small></label>
-                                <input class="form-input mono" [(ngModel)]="notif.genericWebhookSecret" (ngModelChange)="notifDirty = true" placeholder="optional">
-                            </div>
-                        </div>
-                        <h4 class="subsection-title" *ngIf="notif">Email</h4>
-                        <div class="form-grid" *ngIf="notif">
-                            <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnBlocked" (ngModelChange)="notifDirty = true"> Email me when an order is held as blocked</label>
-                            <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnHighRisk" (ngModelChange)="notifDirty = true"> Email me when an order is held for review</label>
-                            <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnApproval" (ngModelChange)="notifDirty = true"> Email the customer when I approve their order</label>
                         </div>
                         <div style="margin-top:14px">
                             <button class="gbtn gbtn-primary gbtn-sm" (click)="saveNotif()" [disabled]="!notifDirty">Save notification settings</button>
@@ -1014,6 +1057,24 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
             color: var(--gb-strong); font-size: 13px;
         }
         .tpl-preview-subject { font-weight: 700; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--gb-line); }
+        .integrations { border: 1px solid var(--gb-line); border-radius: 10px; overflow: hidden; }
+        .integ-row + .integ-row { border-top: 1px solid var(--gb-line-soft); }
+        .integ-head {
+            display: flex; align-items: center; gap: 10px; width: 100%;
+            padding: 12px 14px; background: none; border: 0; cursor: pointer;
+            text-align: left; color: var(--gb-strong); font-size: 13px;
+        }
+        .integ-head:hover { background: var(--gb-surface-2); }
+        .integ-head:focus-visible { outline: 2px solid var(--gb-amber-edge); outline-offset: -2px; }
+        .integ-icon { font-size: 16px; width: 24px; text-align: center; flex: 0 0 auto; }
+        .integ-name { font-weight: 700; flex: 0 0 auto; min-width: 110px; }
+        .integ-desc { color: var(--gb-muted); font-size: 12px; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--gb-ui-border); flex: 0 0 auto; }
+        .status-dot.on { background: var(--gb-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--gb-ok) 25%, transparent); }
+        .integ-state { font-size: 11px; font-weight: 700; color: var(--gb-muted); flex: 0 0 auto; min-width: 66px; text-align: right; }
+        .integ-chev { color: var(--gb-muted); flex: 0 0 auto; }
+        .integ-body { padding: 4px 14px 16px 48px; }
+        .integ-body .check-label { margin-top: 8px; }
 
         /* ── Simulate ─────────────────────────────────────────────── */
         .sim-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
@@ -1112,6 +1173,17 @@ export class FraudPreventionComponent implements OnInit {
     lookupEmail = '';
     lookupBusy = false;
     profile: any = null;
+
+    advancedOpen = false;
+    integOpen = '';
+    presets = [
+        { key: 'relaxed', label: 'Relaxed', description: 'High-trust store, mostly repeat customers. Only clear-cut fraud patterns are held.',
+          values: { reviewThreshold: 55, blockThreshold: 85, maxOrdersPerIpPerHour: 8, maxOrdersPerIpPerDay: 30, maxOrdersPerEmailPerDay: 15, maxOrderValuePence: 1000000, maxDailyValuePerEmailPence: 2000000, requireEmailVerificationAbovePence: 250000 } },
+        { key: 'balanced', label: 'Balanced', description: 'Sensible defaults for most stores — catches the classic patterns without bothering real customers.',
+          values: { reviewThreshold: 40, blockThreshold: 70, maxOrdersPerIpPerHour: 5, maxOrdersPerIpPerDay: 20, maxOrdersPerEmailPerDay: 10, maxOrderValuePence: 500000, maxDailyValuePerEmailPence: 1000000, requireEmailVerificationAbovePence: 100000 } },
+        { key: 'strict', label: 'Strict', description: 'Recently hit by fraud, or high-risk vertical. Expect more reviews — pair with the auto-approve timer.',
+          values: { reviewThreshold: 30, blockThreshold: 55, maxOrdersPerIpPerHour: 3, maxOrdersPerIpPerDay: 12, maxOrdersPerEmailPerDay: 6, maxOrderValuePence: 250000, maxDailyValuePerEmailPence: 600000, requireEmailVerificationAbovePence: 50000 } },
+    ];
 
     templates: any = null;
     templateKinds = [
@@ -1402,6 +1474,41 @@ export class FraudPreventionComponent implements OnInit {
             next: rows => { this.logRows = rows; this.cdr.markForCheck(); },
             error: () => undefined,
         });
+    }
+
+    // ── Presets + integrations ─────────────────────────────────────
+    applyPreset(key: string) {
+        const p = this.presets.find(x => x.key === key);
+        if (!p || !this.current) return;
+        Object.assign(this.current, p.values);
+        this.markDirty();
+    }
+
+    activePreset(): string {
+        const c = this.current;
+        if (!c) return 'custom';
+        for (const p of this.presets) {
+            if (Object.entries(p.values).every(([k, v]) => (c as any)[k] === v)) return p.key;
+        }
+        return 'custom';
+    }
+
+    integrationDefs() {
+        const n = this.notif || {};
+        return [
+            { key: 'email', name: 'Email', icon: '✉️', description: 'Admin alerts + customer approval notices via your SMTP',
+              configured: () => !!(n.smtpConfigured && n.adminEmail) },
+            { key: 'slack', name: 'Slack', icon: '💬', description: 'Incoming-webhook message per case event',
+              configured: () => !!n.slackWebhookUrl },
+            { key: 'discord', name: 'Discord', icon: '🎮', description: 'Channel webhook message per case event',
+              configured: () => !!n.discordWebhookUrl },
+            { key: 'teams', name: 'Teams', icon: '🏢', description: 'Microsoft Teams incoming webhook',
+              configured: () => !!n.teamsWebhookUrl },
+            { key: 'telegram', name: 'Telegram', icon: '📱', description: 'Bot message to a chat or group',
+              configured: () => !!(n.telegramBotToken && n.telegramChatId) },
+            { key: 'webhook', name: 'Webhook', icon: '🔗', description: 'Signed JSON POST for your own systems',
+              configured: () => !!n.genericWebhookUrl },
+        ];
     }
 
     // ── Lookup ─────────────────────────────────────────────────────
