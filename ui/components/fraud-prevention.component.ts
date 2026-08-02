@@ -408,7 +408,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                 <button *ngFor="let f of caseFilters" class="seg" [class.active]="caseFilter === f" (click)="caseFilter = f; loadCases()">{{ f || 'all' }}</button>
                             </span>
                         </div>
-                        <p class="hint">Approve releases held licence keys and emails the customer. Reject cancels the order and notifies them.</p>
+                        <p class="hint">Approve releases held licence keys; reject cancels the order. The <em>email customer</em> tick controls whether they hear about it — untick to resolve silently. <em>Blocklist</em> (with reject) quietly bans the email + IP so a fraudster learns nothing and still can't come back.</p>
 
                         <table class="table" *ngIf="cases.length; else noCases">
                             <thead><tr><th>Order</th><th>Customer</th><th>Score</th><th>Signals</th><th>Age</th><th>Status</th><th></th></tr></thead>
@@ -426,6 +426,14 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                     <td class="num-col case-actions">
                                         <ng-container *ngIf="c.status === 'pending'">
                                             <input class="form-input notes-input" placeholder="notes…" [(ngModel)]="caseNotes[c.id]">
+                                            <span class="case-opts">
+                                                <label class="check-label check-sm" title="Send the customer your approved / rejected message. Untick to resolve silently.">
+                                                    <input type="checkbox" [ngModel]="caseNotify(c.id)" (ngModelChange)="caseNotifyOverride[c.id] = $event"> email customer
+                                                </label>
+                                                <label class="check-label check-sm" title="On reject: silently blocklist this email + IP so future attempts stop at the door. Defaults to your global setting.">
+                                                    <input type="checkbox" [ngModel]="caseBlock(c.id)" (ngModelChange)="caseBlocklist[c.id] = $event"> blocklist
+                                                </label>
+                                            </span>
                                             <button class="gbtn gbtn-primary gbtn-sm" (click)="resolveCase(c, 'approve')" [disabled]="busyCase === c.id">Approve</button>
                                             <button class="gbtn gbtn-ghost gbtn-danger gbtn-sm" (click)="resolveCase(c, 'reject')" [disabled]="busyCase === c.id">Reject</button>
                                         </ng-container>
@@ -696,6 +704,8 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                             <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnBlocked" (ngModelChange)="notifDirty = true"> Alert me on blocked-level holds</label>
                                             <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnHighRisk" (ngModelChange)="notifDirty = true"> Alert me on review-level holds</label>
                                             <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnApproval" (ngModelChange)="notifDirty = true"> Email the customer when I approve their order</label>
+                                            <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnRejection" (ngModelChange)="notifDirty = true"> Email the customer when I reject their order</label>
+                                            <label class="check-label"><input type="checkbox" [(ngModel)]="notif.blocklistOnReject" (ngModelChange)="notifDirty = true"> Silently blocklist the email + IP whenever I reject (no tip-off)</label>
                                         </ng-container>
                                         <div class="form-row" *ngSwitchCase="'slack'">
                                             <label>Incoming webhook URL</label>
@@ -1026,6 +1036,9 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
         .mini-fill { display: block; height: 100%; background: var(--gb-amber); border-radius: 999px; }
         .case-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
         .notes-input { max-width: 130px; min-height: 30px; padding: 4px 8px; font-size: 12px; }
+        .case-opts { display: inline-flex; flex-direction: column; gap: 2px; }
+        .check-label.check-sm { font-size: 11px; gap: 5px; font-weight: 600; color: var(--gb-muted); white-space: nowrap; }
+        .check-label.check-sm input { width: 13px; height: 13px; }
         .picker { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
         .chip-x {
             display: inline-grid; place-items: center; min-width: 22px; min-height: 22px; border-radius: 999px;
@@ -1136,6 +1149,8 @@ export class FraudPreventionComponent implements OnInit {
     caseFilters = ['pending', 'approved', 'rejected', ''];
     caseFilter = 'pending';
     caseNotes: Record<number, string> = {};
+    caseNotifyOverride: Record<number, boolean> = {};
+    caseBlocklist: Record<number, boolean> = {};
     busyCase: number | null = null;
 
     wl: any[] = [];
@@ -1312,7 +1327,18 @@ export class FraudPreventionComponent implements OnInit {
     }
 
     // ── Review queue ───────────────────────────────────────────────
+    caseNotify(id: number): boolean {
+        if (this.caseNotifyOverride[id] !== undefined) return this.caseNotifyOverride[id];
+        return this.notif ? !!(this.notif.notifyOnApproval || this.notif.notifyOnRejection) : true;
+    }
+
+    caseBlock(id: number): boolean {
+        if (this.caseBlocklist[id] !== undefined) return this.caseBlocklist[id];
+        return this.notif ? !!this.notif.blocklistOnReject : false;
+    }
+
     loadCases() {
+        if (!this.notif) this.loadNotif();
         const q = this.caseFilter ? `?status=${this.caseFilter}` : '';
         this.http.get<any[]>(`/fraud-prevention/cases${q}`).subscribe({
             next: rows => {
@@ -1326,11 +1352,16 @@ export class FraudPreventionComponent implements OnInit {
 
     resolveCase(c: any, action: 'approve' | 'reject') {
         this.busyCase = c.id;
-        this.http.post<any>(`/fraud-prevention/cases/${c.id}/${action}`, { notes: this.caseNotes[c.id] || '' }).subscribe({
+        const payload: any = { notes: this.caseNotes[c.id] || '' };
+        if (this.caseNotifyOverride[c.id] !== undefined) payload.notifyCustomer = this.caseNotifyOverride[c.id];
+        if (action === 'reject' && this.caseBlocklist[c.id] !== undefined) payload.blocklistIdentity = this.caseBlocklist[c.id];
+        this.http.post<any>(`/fraud-prevention/cases/${c.id}/${action}`, payload).subscribe({
             next: r => {
                 this.busyCase = null;
                 if (r.ok) {
-                    this.notification.success(`Case ${action === 'approve' ? 'approved — keys released' : 'rejected — order cancelled'}`);
+                    const quiet = payload.notifyCustomer === false ? ' (silently)' : '';
+                    const banned = r.blocklisted?.length ? ` — ${r.blocklisted.length} identity value(s) blocklisted` : '';
+                    this.notification.success(`Case ${action === 'approve' ? 'approved — keys released' : 'rejected — order cancelled'}${quiet}${banned}`);
                     this.loadCases();
                     this.loadStats();
                 } else {

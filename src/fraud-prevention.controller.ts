@@ -108,12 +108,17 @@ export class FraudPreventionController {
     }
 
     @Post('cases/:id/approve')
-    async approve(@Ctx() ctx: RequestContext, @Res() res: Response, @Param('id') id: string, @Body() body: { notes?: string }) {
+    async approve(
+        @Ctx() ctx: RequestContext, @Res() res: Response, @Param('id') id: string,
+        @Body() body: { notes?: string; notifyCustomer?: boolean },
+    ) {
         if (denyUnlessAdmin(ctx, res, true)) return;
         const result = await this.service.resolveCase(Number(id), 'approved', body?.notes);
         if (result.ok && result.caseRow?.email) {
             const notif = await this.service.getNotificationConfig();
-            if (notif.notifyOnApproval) {
+            // Per-case override wins; otherwise the settings default.
+            const notify = body?.notifyCustomer !== undefined ? !!body.notifyCustomer : !!notif.notifyOnApproval;
+            if (notify) {
                 await this.service.sendCustomerTemplate(
                     Number(result.caseRow.channelId), 'approved', result.caseRow.email,
                     { orderCode: result.caseRow.orderCode },
@@ -121,7 +126,7 @@ export class FraudPreventionController {
             }
             await this.service.notifyOps({
                 event: 'case.approved',
-                text: `✅ Fraud case approved — order ${result.caseRow.orderCode || ''} released`,
+                text: `✅ Fraud case approved — order ${result.caseRow.orderCode || ''} released${notify ? '' : ' (customer not notified)'}`,
                 orderCode: result.caseRow.orderCode,
             });
         }
@@ -129,19 +134,33 @@ export class FraudPreventionController {
     }
 
     @Post('cases/:id/reject')
-    async reject(@Ctx() ctx: RequestContext, @Res() res: Response, @Param('id') id: string, @Body() body: { notes?: string }) {
+    async reject(
+        @Ctx() ctx: RequestContext, @Res() res: Response, @Param('id') id: string,
+        @Body() body: { notes?: string; notifyCustomer?: boolean; blocklistIdentity?: boolean },
+    ) {
         if (denyUnlessAdmin(ctx, res, true)) return;
         const result = await this.service.resolveCase(Number(id), 'rejected', body?.notes);
-        if (result.ok && result.caseRow?.email) {
-            await this.service.sendCustomerTemplate(
-                Number(result.caseRow.channelId), 'rejected', result.caseRow.email,
-                { orderCode: result.caseRow.orderCode },
-            );
+        if (result.ok && result.caseRow) {
+            const notif = await this.service.getNotificationConfig();
+            const notify = body?.notifyCustomer !== undefined ? !!body.notifyCustomer : !!notif.notifyOnRejection;
+            if (notify && result.caseRow.email) {
+                await this.service.sendCustomerTemplate(
+                    Number(result.caseRow.channelId), 'rejected', result.caseRow.email,
+                    { orderCode: result.caseRow.orderCode },
+                );
+            }
+            const doBlock = body?.blocklistIdentity !== undefined ? !!body.blocklistIdentity : !!notif.blocklistOnReject;
+            let blocked: string[] = [];
+            if (doBlock) {
+                blocked = await this.service.blocklistCaseIdentity(result.caseRow, Number(id));
+            }
             await this.service.notifyOps({
                 event: 'case.rejected',
-                text: `🚫 Fraud case rejected — order ${result.caseRow.orderCode || ''} cancelled`,
+                text: `🚫 Fraud case rejected — order ${result.caseRow.orderCode || ''} cancelled` +
+                    `${notify ? '' : ' (customer not notified)'}${blocked.length ? ` — identity blocklisted (${blocked.join(', ')})` : ''}`,
                 orderCode: result.caseRow.orderCode,
             });
+            return res.json({ ...result, blocklisted: blocked });
         }
         return res.json(result);
     }

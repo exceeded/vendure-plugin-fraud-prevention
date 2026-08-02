@@ -171,6 +171,8 @@ export class FraudPreventionService implements OnModuleInit {
                 notifyOnApproval TINYINT DEFAULT 1
             )`);
         await this.db.query(`ALTER TABLE fraud_notification_config ADD COLUMN IF NOT EXISTS slackWebhookUrl VARCHAR(512) NULL`);
+        await this.db.query(`ALTER TABLE fraud_notification_config ADD COLUMN IF NOT EXISTS notifyOnRejection TINYINT DEFAULT 1`);
+        await this.db.query(`ALTER TABLE fraud_notification_config ADD COLUMN IF NOT EXISTS blocklistOnReject TINYINT DEFAULT 0`);
         for (const col of ['discordWebhookUrl VARCHAR(512)', 'teamsWebhookUrl VARCHAR(512)',
                            'telegramBotToken VARCHAR(128)', 'telegramChatId VARCHAR(64)',
                            'genericWebhookUrl VARCHAR(512)', 'genericWebhookSecret VARCHAR(128)']) {
@@ -871,6 +873,31 @@ export class FraudPreventionService implements OnModuleInit {
         };
     }
 
+    /** Silently blocklist a case's identity (email + canonical + IP) so
+     *  future attempts stop at the door — used with quiet rejections so
+     *  a fraudster learns nothing. */
+    async blocklistCaseIdentity(caseRow: any, caseId: number): Promise<string[]> {
+        const added: string[] = [];
+        const note = `rejected case #${caseId}`;
+        const norm = caseRow.email ? normalizeEmail(caseRow.email) : null;
+        const values: Array<[string, string]> = [];
+        if (norm) {
+            values.push(['email', norm.email]);
+            if (norm.canonical !== norm.email) values.push(['email', norm.canonical]);
+        }
+        if (caseRow.ip) values.push(['ip', String(caseRow.ip)]);
+        for (const [type, value] of values) {
+            const exists = await this.db.query(
+                `SELECT id FROM fraud_blocklist WHERE listType = ? AND value = ? LIMIT 1`, [type, value],
+            ).catch(() => []);
+            if (!exists.length) {
+                await this.addEntry('blocklist', type, value, note);
+                added.push(`${type}:${value}`);
+            }
+        }
+        return added;
+    }
+
     // ── Auto-release (weekend safety valve) ────────────────────────────
     async autoReleaseStale(): Promise<number> {
         const configs = await this.db.query(
@@ -980,6 +1007,8 @@ export class FraudPreventionService implements OnModuleInit {
             notifyOnBlocked: rows[0] ? !!rows[0].notifyOnBlocked : true,
             notifyOnHighRisk: rows[0] ? !!rows[0].notifyOnHighRisk : true,
             notifyOnApproval: rows[0] ? !!rows[0].notifyOnApproval : true,
+            notifyOnRejection: rows[0] ? (rows[0].notifyOnRejection == null ? true : !!rows[0].notifyOnRejection) : true,
+            blocklistOnReject: rows[0] ? !!rows[0].blocklistOnReject : false,
             slackWebhookUrl: rows[0]?.slackWebhookUrl || '',
             discordWebhookUrl: rows[0]?.discordWebhookUrl || '',
             teamsWebhookUrl: rows[0]?.teamsWebhookUrl || '',
@@ -993,17 +1022,19 @@ export class FraudPreventionService implements OnModuleInit {
 
     async saveNotificationConfig(body: any): Promise<void> {
         await this.db.query(
-            `INSERT INTO fraud_notification_config (id, adminEmail, notifyOnBlocked, notifyOnHighRisk, notifyOnApproval,
+            `INSERT INTO fraud_notification_config (id, adminEmail, notifyOnBlocked, notifyOnHighRisk, notifyOnApproval, notifyOnRejection, blocklistOnReject,
                 slackWebhookUrl, discordWebhookUrl, teamsWebhookUrl, telegramBotToken, telegramChatId,
                 genericWebhookUrl, genericWebhookSecret)
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE adminEmail=VALUES(adminEmail), notifyOnBlocked=VALUES(notifyOnBlocked),
                 notifyOnHighRisk=VALUES(notifyOnHighRisk), notifyOnApproval=VALUES(notifyOnApproval),
+                notifyOnRejection=VALUES(notifyOnRejection), blocklistOnReject=VALUES(blocklistOnReject),
                 slackWebhookUrl=VALUES(slackWebhookUrl), discordWebhookUrl=VALUES(discordWebhookUrl),
                 teamsWebhookUrl=VALUES(teamsWebhookUrl), telegramBotToken=VALUES(telegramBotToken),
                 telegramChatId=VALUES(telegramChatId), genericWebhookUrl=VALUES(genericWebhookUrl),
                 genericWebhookSecret=VALUES(genericWebhookSecret)`,
             [body.adminEmail || '', body.notifyOnBlocked ? 1 : 0, body.notifyOnHighRisk ? 1 : 0, body.notifyOnApproval ? 1 : 0,
+             body.notifyOnRejection ? 1 : 0, body.blocklistOnReject ? 1 : 0,
              body.slackWebhookUrl || null, body.discordWebhookUrl || null, body.teamsWebhookUrl || null,
              body.telegramBotToken || null, body.telegramChatId || null,
              body.genericWebhookUrl || null, body.genericWebhookSecret || null],

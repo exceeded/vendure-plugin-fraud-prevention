@@ -5,6 +5,20 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-08-02
+
+### Added
+- **Silent resolution.** Approve and Reject each carry a per-case
+  "email customer" tick — untick to resolve without telling the customer
+  anything. Defaults follow the global settings.
+- **Silent identity blocklist on reject.** A per-case "blocklist" tick
+  (and a global default) quietly adds the rejected email + canonical +
+  IP to the blocklist, so a fraudster is turned away next time and never
+  learns why — the classic don't-tip-them-off move.
+- **Global notification defaults**: email-on-approval, email-on-rejection
+  and blocklist-on-reject are all channel-wide toggles in Settings; the
+  per-case ticks pre-fill from them and override for the single case.
+
 ## [0.3.3] — 2026-08-02
 
 ### Fixed
