@@ -43,8 +43,10 @@ export class FraudPreventionController {
             countryCode: body.countryCode || (req.headers['cf-ipcountry'] as string) || undefined,
             dryRun: true,
         });
-        // Public shape stays minimal — no signal internals for attackers to probe.
-        return res.json({
+        // Public shape stays minimal — no signal internals for attackers to
+        // probe. Explicit 200: a risk check is a read, not a 201 "create"
+        // (Nest's default status for a POST handler).
+        return res.status(200).json({
             allowed: assessment.action !== 'block',
             riskLevel: assessment.level,
         });

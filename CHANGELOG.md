@@ -5,6 +5,19 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-08-02
+
+### Fixed
+- Public `POST /fraud-prevention/check` returned Nest's default `201` for
+  a POST; it's a read-only risk check, so it now returns `200`.
+
+### Added
+- End-to-end test suite (`@vendure/testing`, real MariaDB dialect): admin
+  auth gating, public-check shape + rate limiting, and the assessment
+  engine (disposable email, order value, returning-customer trust credit,
+  blocklist incl. CIDR ranges, allowlist bypass, unlicensed enforce
+  downgrade). 11 e2e tests.
+
 ## [0.4.2] — 2026-08-02
 
 ### Fixed
