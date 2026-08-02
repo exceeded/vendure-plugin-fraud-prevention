@@ -27,6 +27,14 @@ export class FraudCrons {
         }
     }
 
+    /** Hourly auto-release of stale pending cases (per-channel opt-in). */
+    @Cron(CronExpression.EVERY_HOUR)
+    async autoRelease() {
+        if (this.processContext.isServer) return;
+        const n = await this.service.autoReleaseStale();
+        if (n > 0) Logger.info(`Auto-released ${n} stale fraud case(s)`, loggerCtx);
+    }
+
     /** Nightly audit-log retention. */
     @Cron(CronExpression.EVERY_DAY_AT_4AM)
     async pruneLog() {

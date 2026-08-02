@@ -23,10 +23,11 @@ interface FraudConfig {
     enforce3dSecure: boolean;
     maxFailedPaymentsPerIpPerHour: number;
     cooldownMinutesAfterFailedPayment: number;
+    autoApproveAfterHours: number;
     signalWeights: Record<string, number>;
 }
 
-type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'activity' | 'settings';
+type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | 'activity' | 'settings';
 
 @Component({
     selector: 'hulo-fraud-prevention',
@@ -141,6 +142,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'activity' |
                         </button>
                         <button class="tab" role="tab" [attr.aria-selected]="tab === 'lists'" [class.active]="tab === 'lists'" (click)="go('lists')">Lists</button>
                         <button class="tab" role="tab" [attr.aria-selected]="tab === 'simulate'" [class.active]="tab === 'simulate'" (click)="go('simulate')">Simulate</button>
+                        <button class="tab" role="tab" [attr.aria-selected]="tab === 'lookup'" [class.active]="tab === 'lookup'" (click)="go('lookup')">Lookup</button>
                         <button class="tab" role="tab" [attr.aria-selected]="tab === 'activity'" [class.active]="tab === 'activity'" (click)="go('activity')">Activity</button>
                         <button class="tab" role="tab" [attr.aria-selected]="tab === 'settings'" [class.active]="tab === 'settings'" (click)="go('settings')">Settings</button>
                     </div>
@@ -280,6 +282,10 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'activity' |
                                     <input type="checkbox" [(ngModel)]="current.holdFulfilment" (ngModelChange)="markDirty()">
                                     Hold licence-key fulfilment while a case is pending
                                 </label>
+                            </div>
+                            <div class="form-row">
+                                <label>Auto-approve unreviewed cases after <small>(hours, 0 = never)</small></label>
+                                <input class="form-input" type="number" min="0" [(ngModel)]="current.autoApproveAfterHours" (ngModelChange)="markDirty()">
                             </div>
                         </div>
                     </div>
@@ -517,6 +523,66 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'activity' |
             </vdr-page-block>
         </ng-container>
 
+        <!-- ============================================================ LOOKUP -->
+        <ng-container *ngIf="!loading && current && tab === 'lookup'">
+            <vdr-page-block>
+                <div class="card">
+                    <div class="card-block">
+                        <h3 class="step-title">Customer lookup</h3>
+                        <p class="hint">Full dossier for any email — order history, spend, failed payments, prior cases and list status. Plus-addressed variants are folded into one identity.</p>
+                        <div class="picker">
+                            <input class="form-input" style="min-width:280px" placeholder="customer@example.com" [(ngModel)]="lookupEmail" (keyup.enter)="runLookup()">
+                            <button class="gbtn gbtn-primary" (click)="runLookup()" [disabled]="lookupBusy || !lookupEmail">{{ lookupBusy ? 'Looking…' : 'Look up' }}</button>
+                        </div>
+
+                        <div *ngIf="profile">
+                            <div class="sim-banner" [ngClass]="profile.onBlocklist ? 'deny' : profile.onAllowlist ? 'allow' : 'flag'" style="margin-top:8px">
+                                <strong>{{ profile.email }}</strong>
+                                <span *ngIf="profile.canonical !== profile.email"> (canonical: {{ profile.canonical }})</span>
+                                — {{ profile.onBlocklist ? '🚫 on the blocklist' : profile.onAllowlist ? '✅ on the allowlist' : 'not on any list' }}<span *ngIf="profile.usedPlusAddressing"> · uses plus-addressing</span>
+                            </div>
+                            <div class="kpi-row" style="margin:14px 0">
+                                <div class="kpi"><div class="kpi-label">Orders</div><div class="kpi-num">{{ profile.totals?.orders || 0 }}</div><div class="kpi-sub">{{ profile.totals?.settled || 0 }} settled · {{ profile.totals?.cancelled || 0 }} cancelled</div></div>
+                                <div class="kpi"><div class="kpi-label">Lifetime value</div><div class="kpi-num">£{{ ((profile.totals?.lifetimeValue || 0) / 100) | number:'1.0-0' }}</div><div class="kpi-sub" *ngIf="profile.totals?.firstOrder">since {{ profile.totals.firstOrder | date:'MMM y' }}</div></div>
+                                <div class="kpi" [class.kpi-alert]="profile.failedPayments > 0"><div class="kpi-label">Failed payments</div><div class="kpi-num">{{ profile.failedPayments }}</div><div class="kpi-sub">all time</div></div>
+                                <div class="kpi" [class.kpi-alert]="profile.cases?.length > 0"><div class="kpi-label">Fraud cases</div><div class="kpi-num">{{ profile.cases?.length || 0 }}</div><div class="kpi-sub">most recent 10</div></div>
+                            </div>
+                            <div class="picker" style="margin-bottom:16px">
+                                <button class="gbtn gbtn-outline gbtn-sm" (click)="lookupListAction('whitelist')" [disabled]="profile.onAllowlist">Add to allowlist</button>
+                                <button class="gbtn gbtn-ghost gbtn-danger gbtn-sm" (click)="lookupListAction('blocklist')" [disabled]="profile.onBlocklist">Add to blocklist</button>
+                            </div>
+                            <h4 class="step-title" style="font-size:13px">Recent orders</h4>
+                            <table class="table" *ngIf="profile.recentOrders?.length; else noProfOrders">
+                                <thead><tr><th>Order</th><th>State</th><th class="num-col">Value</th><th>IP</th><th>Placed</th></tr></thead>
+                                <tbody>
+                                    <tr *ngFor="let o of profile.recentOrders">
+                                        <td><strong>{{ o.code }}</strong></td><td>{{ o.state }}</td>
+                                        <td class="num-col">£{{ (o.subTotalWithTax / 100).toFixed(2) }}</td>
+                                        <td class="mono hint">{{ o.ip || '—' }}</td>
+                                        <td class="hint">{{ o.orderPlacedAt | date:'d MMM y HH:mm' }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            <ng-template #noProfOrders><p class="hint">No orders found for this identity.</p></ng-template>
+                            <h4 class="step-title" style="font-size:13px;margin-top:16px" *ngIf="profile.log?.length">Assessment history</h4>
+                            <table class="table" *ngIf="profile.log?.length">
+                                <thead><tr><th>When</th><th>Order</th><th class="num-col">Score</th><th>Level</th><th>Action</th></tr></thead>
+                                <tbody>
+                                    <tr *ngFor="let r of profile.log">
+                                        <td class="hint">{{ r.createdAt | date:'d MMM HH:mm' }}</td>
+                                        <td>{{ r.orderCode || '—' }}</td>
+                                        <td class="num-col"><span class="score-pill" [ngClass]="scoreClass(r.riskScore)">{{ r.riskScore }}</span></td>
+                                        <td><span class="level-pill" [ngClass]="'lvl-' + r.riskLevel">{{ r.riskLevel }}</span></td>
+                                        <td>{{ r.action }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </vdr-page-block>
+        </ng-container>
+
         <!-- ============================================================ ACTIVITY -->
         <ng-container *ngIf="!loading && current && tab === 'activity'">
             <vdr-page-block>
@@ -536,6 +602,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'activity' |
                                     <option value="review">review</option><option value="block">block</option>
                                     <option value="approved">approved</option><option value="rejected">rejected</option>
                                 </select>
+                                <button class="gbtn gbtn-outline gbtn-sm" (click)="exportCsv()" [disabled]="!logRows.length">Export CSV</button>
                             </span>
                         </div>
                         <table class="table" *ngIf="logRows.length; else noLog">
@@ -570,6 +637,10 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'activity' |
                         <div class="form-row" *ngIf="notif">
                             <label>Admin alert email</label>
                             <input class="form-input" [(ngModel)]="notif.adminEmail" (ngModelChange)="notifDirty = true" placeholder="you@company.com">
+                        </div>
+                        <div class="form-row" *ngIf="notif">
+                            <label>Slack webhook <small>(optional — pings on every held order)</small></label>
+                            <input class="form-input" [(ngModel)]="notif.slackWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://hooks.slack.com/services/…">
                         </div>
                         <div class="form-grid" *ngIf="notif">
                             <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnBlocked" (ngModelChange)="notifDirty = true"> Email me when an order is held as blocked</label>
@@ -954,6 +1025,10 @@ export class FraudPreventionComponent implements OnInit {
     notif: any = null;
     notifDirty = false;
 
+    lookupEmail = '';
+    lookupBusy = false;
+    profile: any = null;
+
     constructor(
         private http: HttpClient,
         private notification: NotificationService,
@@ -1233,6 +1308,35 @@ export class FraudPreventionComponent implements OnInit {
             next: rows => { this.logRows = rows; this.cdr.markForCheck(); },
             error: () => undefined,
         });
+    }
+
+    // ── Lookup ─────────────────────────────────────────────────────
+    runLookup() {
+        if (!this.lookupEmail) return;
+        this.lookupBusy = true;
+        this.http.get<any>(`/fraud-prevention/customer-profile?email=${encodeURIComponent(this.lookupEmail)}`).subscribe({
+            next: p => { this.lookupBusy = false; this.profile = p; this.cdr.markForCheck(); },
+            error: () => { this.lookupBusy = false; this.notification.error('Lookup failed'); },
+        });
+    }
+
+    lookupListAction(list: 'whitelist' | 'blocklist') {
+        if (!this.profile) return;
+        this.http.post(`/fraud-prevention/lists/${list}`, { type: 'email', value: this.profile.email, note: 'added from Lookup' }).subscribe({
+            next: () => { this.notification.success(`Added to ${list}`); this.runLookup(); },
+            error: () => this.notification.error('Failed'),
+        });
+    }
+
+    exportCsv() {
+        const cols = ['createdAt', 'orderCode', 'email', 'ip', 'riskScore', 'riskLevel', 'action', 'reasons'];
+        const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        const csv = [cols.join(','), ...this.logRows.map(r => cols.map(c => esc(r[c])).join(','))].join('\n');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        a.download = `fraud-log-${new Date().toISOString().slice(0, 10)}.csv`;
+        a.click();
+        URL.revokeObjectURL(a.href);
     }
 
     // ── Settings ───────────────────────────────────────────────────

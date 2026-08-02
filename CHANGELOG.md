@@ -5,6 +5,32 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-08-02
+
+### Added
+- **IP intelligence** (ip-api.com, cached 30 days in `fraud_ip_intel`,
+  fails open): VPN/proxy and datacentre-IP signals — the `blockVpnProxy`
+  toggle finally does something — plus **IP vs billing-country mismatch**.
+- **Email MX validation**: a domain that can't receive mail can't receive
+  licence keys either. Authoritative NXDOMAIN/no-MX scores; DNS timeouts
+  fail open. 24h in-memory cache.
+- **Identity fan-out**: ≥3 distinct customer emails ordering from one IP
+  inside 24h — the classic card-testing pattern.
+- **Customer trust credit**: returning customers earn NEGATIVE points
+  (−12 for 1–2 settled orders, −25 for 3+), counted by canonical email so
+  plus-tag variants share one track record. Score floors at 0. High-value
+  first orders still score as before.
+- **Gibberish-email heuristic** (digit-heavy or keyboard-mash local
+  parts; deliberately low-weight) and **billing/shipping country
+  mismatch** signal.
+- **Customer Lookup tab**: full dossier per email — orders, lifetime
+  value, settled/cancelled split, failed payments, prior cases,
+  assessment history, list status, one-click allow/block.
+- **Slack alerts**: optional webhook pinged on every held order.
+- **Auto-release timer** (per channel, default off): pending cases older
+  than N hours auto-approve so held orders don't strand over a weekend.
+- **CSV export** of the activity log.
+
 ## [0.1.0] — 2026-08-02
 
 First release as a standalone plugin — a full rebuild of the fraud tooling

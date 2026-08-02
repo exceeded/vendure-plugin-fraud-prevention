@@ -60,3 +60,21 @@ describe('normalizeEmail', () => {
         expect(normalizeEmail('x@')).toBeNull();
     });
 });
+
+import { looksGibberish } from './ip-intel';
+
+describe('looksGibberish', () => {
+    it('flags digit-heavy locals', () => {
+        expect(looksGibberish('xk492811')).toBe(true);
+        expect(looksGibberish('9284712x')).toBe(true);
+    });
+    it('flags long consonant runs', () => {
+        expect(looksGibberish('asdkjhqwrtz')).toBe(true);
+    });
+    it('passes normal names', () => {
+        expect(looksGibberish('wayne.garrison')).toBe(false);
+        expect(looksGibberish('chris.wiles')).toBe(false);
+        expect(looksGibberish('sales')).toBe(false);
+        expect(looksGibberish('john1985')).toBe(false);
+    });
+});

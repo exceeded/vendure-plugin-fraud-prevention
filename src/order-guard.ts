@@ -42,27 +42,17 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
         const channelId = Number(event.ctx.channelId || 1);
         const email = order.customer?.emailAddress || '';
 
-        let isReturning: boolean | undefined;
-        try {
-            if (order.customer?.id) {
-                const rows = await (this.service as any).connection.rawConnection.query(
-                    `SELECT COUNT(*) AS n FROM \`order\`
-                     WHERE customerId = ? AND id <> ? AND state IN ('PaymentSettled', 'Delivered')`,
-                    [order.customer.id, order.id],
-                );
-                isReturning = Number(rows[0]?.n || 0) > 0;
-            }
-        } catch { /* signal simply won't fire */ }
-
         const input: AssessInput = {
             channelId,
             ip: (order.customFields as any)?.ip || undefined,
             email,
             orderValuePence: order.subTotalWithTax || 0,
             countryCode: order.billingAddress?.countryCode || order.shippingAddress?.countryCode || undefined,
+            shippingCountryCode: order.shippingAddress?.countryCode || undefined,
             orderId: Number(order.id),
             orderCode: order.code,
-            isReturningCustomer: isReturning,
+            // customer history is computed inside the service by canonical
+            // email, so plus-tag variants share one track record
         };
 
         const assessment = await this.service.assess(input);
@@ -86,6 +76,11 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
         Logger.warn(
             `Order ${order.code} held for review (case #${caseId}, score ${assessment.score}, action ${assessment.action})`,
             loggerCtx,
+        );
+
+        await this.service.sendSlackAlert(
+            `:rotating_light: Order *${order.code}* held for review — score ${assessment.score}/100 (${assessment.level}). ` +
+            assessment.signals.map(s => s.label).join(', '),
         );
 
         const notif = await this.service.getNotificationConfig();

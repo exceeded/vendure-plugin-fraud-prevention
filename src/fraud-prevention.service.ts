@@ -16,6 +16,7 @@ import {
 } from './types';
 import { BUILTIN_DISPOSABLE_DOMAINS, FRAUD_SOURCES } from './fraud-sources';
 import { ipInCidr, normalizeEmail } from './net-util';
+import { domainHasMx, lookupIpIntel, looksGibberish, IpIntel } from './ip-intel';
 
 const loggerCtx = 'FraudPrevention';
 
@@ -25,6 +26,7 @@ export interface AssessInput {
     email?: string;
     orderValuePence: number;
     countryCode?: string;
+    shippingCountryCode?: string;
     orderId?: number;
     orderCode?: string;
     /** True when this customer has at least one prior settled order. */
@@ -150,6 +152,15 @@ export class FraudPreventionService implements OnModuleInit {
                 INDEX idx_wl_type_value (type, value)
             )`);
         await this.db.query(`
+            CREATE TABLE IF NOT EXISTS fraud_ip_intel (
+                ip VARCHAR(64) PRIMARY KEY,
+                countryCode VARCHAR(4) NULL,
+                isVpnOrProxy TINYINT DEFAULT 0,
+                isHosting TINYINT DEFAULT 0,
+                checkedAt DATETIME
+            )`);
+        await this.db.query(`ALTER TABLE fraud_config ADD COLUMN IF NOT EXISTS autoApproveAfterHours INT DEFAULT 0`);
+        await this.db.query(`
             CREATE TABLE IF NOT EXISTS fraud_notification_config (
                 id INT PRIMARY KEY DEFAULT 1,
                 adminEmail VARCHAR(255),
@@ -157,6 +168,7 @@ export class FraudPreventionService implements OnModuleInit {
                 notifyOnHighRisk TINYINT DEFAULT 1,
                 notifyOnApproval TINYINT DEFAULT 1
             )`);
+        await this.db.query(`ALTER TABLE fraud_notification_config ADD COLUMN IF NOT EXISTS slackWebhookUrl VARCHAR(512) NULL`);
     }
 
     // ── Config ──────────────────────────────────────────────────────────
@@ -186,6 +198,7 @@ export class FraudPreventionService implements OnModuleInit {
             enforce3dSecure: !!row.enforce3dSecure,
             maxFailedPaymentsPerIpPerHour: row.maxFailedPaymentsPerIpPerHour ?? DEFAULT_CONFIG.maxFailedPaymentsPerIpPerHour,
             cooldownMinutesAfterFailedPayment: row.cooldownMinutesAfterFailedPayment ?? DEFAULT_CONFIG.cooldownMinutesAfterFailedPayment,
+            autoApproveAfterHours: row.autoApproveAfterHours ?? 0,
             signalWeights: weights,
         };
     }
@@ -214,8 +227,8 @@ export class FraudPreventionService implements OnModuleInit {
                 maxOrdersPerIpPerHour, maxOrdersPerIpPerDay, maxOrdersPerEmailPerDay, maxDailyValuePerEmailPence,
                 maxOrderValuePence, requireEmailVerificationAbovePence, blockDisposableEmails, blockVpnProxy,
                 blockHighRiskCountries, highRiskCountries, enforce3dSecure, maxFailedPaymentsPerIpPerHour,
-                cooldownMinutesAfterFailedPayment, signalWeights)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cooldownMinutesAfterFailedPayment, autoApproveAfterHours, signalWeights)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
                 enabled=VALUES(enabled), mode=VALUES(mode), reviewThreshold=VALUES(reviewThreshold),
                 blockThreshold=VALUES(blockThreshold), holdFulfilment=VALUES(holdFulfilment),
@@ -225,14 +238,15 @@ export class FraudPreventionService implements OnModuleInit {
                 blockDisposableEmails=VALUES(blockDisposableEmails), blockVpnProxy=VALUES(blockVpnProxy),
                 blockHighRiskCountries=VALUES(blockHighRiskCountries), highRiskCountries=VALUES(highRiskCountries),
                 enforce3dSecure=VALUES(enforce3dSecure), maxFailedPaymentsPerIpPerHour=VALUES(maxFailedPaymentsPerIpPerHour),
-                cooldownMinutesAfterFailedPayment=VALUES(cooldownMinutesAfterFailedPayment), signalWeights=VALUES(signalWeights)`,
+                cooldownMinutesAfterFailedPayment=VALUES(cooldownMinutesAfterFailedPayment),
+                autoApproveAfterHours=VALUES(autoApproveAfterHours), signalWeights=VALUES(signalWeights)`,
             [
                 c.channelId, c.enabled ? 1 : 0, c.mode, c.reviewThreshold, c.blockThreshold, c.holdFulfilment ? 1 : 0,
                 c.maxOrdersPerIpPerHour, c.maxOrdersPerIpPerDay, c.maxOrdersPerEmailPerDay, c.maxDailyValuePerEmailPence,
                 c.maxOrderValuePence, c.requireEmailVerificationAbovePence, c.blockDisposableEmails ? 1 : 0,
                 c.blockVpnProxy ? 1 : 0, c.blockHighRiskCountries ? 1 : 0, c.highRiskCountries || '',
                 c.enforce3dSecure ? 1 : 0, c.maxFailedPaymentsPerIpPerHour, c.cooldownMinutesAfterFailedPayment,
-                JSON.stringify(c.signalWeights || {}),
+                c.autoApproveAfterHours || 0, JSON.stringify(c.signalWeights || {}),
             ],
         );
     }
@@ -247,7 +261,7 @@ export class FraudPreventionService implements OnModuleInit {
         const signals: FraudSignal[] = [];
         const push = (key: string, label: string, detail: string) => {
             const points = this.weight(cfg, key);
-            if (points > 0) signals.push({ key, label, points, detail });
+            if (points !== 0) signals.push({ key, label, points, detail });
         };
 
         if (!cfg.enabled || cfg.mode === 'off') {
@@ -356,15 +370,87 @@ export class FraudPreventionService implements OnModuleInit {
             }
         }
 
+        // 5b. Identity fan-out — many distinct emails ordering from one IP
+        //     inside 24h is the classic card-testing pattern.
+        if (input.ip) {
+            const [fanRow] = await this.db.query(
+                `SELECT COUNT(DISTINCT LOWER(c.emailAddress)) AS n
+                 FROM \`order\` o JOIN customer c ON c.id = o.customerId
+                 WHERE o.customFieldsIp = ? AND o.orderPlacedAt > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+                [input.ip],
+            );
+            const fan = Number(fanRow?.n || 0);
+            if (fan >= 3) {
+                push('identity_fanout', 'Identity fan-out', `${fan} different customer emails from this IP in 24h`);
+            }
+        }
+
+        // 5c. IP intelligence — VPN/proxy/hosting + geo vs billing country.
+        //     Cached 30 days in fraud_ip_intel; lookups fail open.
+        if (input.ip) {
+            const intel = await this.getIpIntel(input.ip);
+            if (intel.resolved) {
+                if (cfg.blockVpnProxy && intel.isVpnOrProxy) {
+                    push('vpn_proxy', 'VPN / proxy IP', input.ip);
+                }
+                if (cfg.blockVpnProxy && intel.isHosting && !intel.isVpnOrProxy) {
+                    push('hosting_ip', 'Datacentre / hosting IP', input.ip);
+                }
+                if (intel.countryCode && input.countryCode
+                    && intel.countryCode.toUpperCase() !== input.countryCode.toUpperCase()) {
+                    push('geo_mismatch', 'IP / billing country mismatch',
+                        `IP in ${intel.countryCode}, billing ${input.countryCode.toUpperCase()}`);
+                }
+            }
+        }
+
+        // 5d. Email deliverability + shape.
+        if (norm) {
+            const hasMx = await domainHasMx(norm.domain);
+            if (hasMx === false) {
+                push('email_no_mx', 'Email domain has no MX records', `${norm.domain} cannot receive mail`);
+            }
+            if (looksGibberish(norm.email.split('@')[0])) {
+                push('gibberish_email', 'Gibberish email local part', norm.email);
+            }
+        }
+
+        // 5e. Billing vs shipping country (both present and different).
+        if (input.countryCode && input.shippingCountryCode
+            && input.countryCode.toUpperCase() !== input.shippingCountryCode.toUpperCase()) {
+            push('country_mismatch', 'Billing / shipping country differ',
+                `${input.countryCode.toUpperCase()} vs ${input.shippingCountryCode.toUpperCase()}`);
+        }
+
         // 6. Order value.
         if (input.orderValuePence > cfg.maxOrderValuePence) {
             push('order_value', 'High order value',
                 `£${(input.orderValuePence / 100).toFixed(2)} > £${(cfg.maxOrderValuePence / 100).toFixed(2)} limit`);
         }
 
-        // 7. First order + high value.
-        if (input.isReturningCustomer === false
-            && input.orderValuePence > cfg.requireEmailVerificationAbovePence) {
+        // 7. Customer history — positive trust for a track record, caution
+        //    for a high-value first order. Counted by canonical email so the
+        //    credit survives plus-tag variations, and simulate can override
+        //    via isReturningCustomer.
+        let settledCount = 0;
+        if (input.isReturningCustomer !== undefined) {
+            settledCount = input.isReturningCustomer ? 3 : 0;
+        } else if (norm) {
+            const like = norm.canonical === norm.email ? [norm.email] : [norm.email, norm.canonical];
+            const [histRow] = await this.db.query(
+                `SELECT COUNT(*) AS n FROM \`order\` o JOIN customer c ON c.id = o.customerId
+                 WHERE LOWER(c.emailAddress) IN (${like.map(() => '?').join(',')})
+                   AND o.state IN ('PaymentSettled', 'Delivered')
+                   AND (o.id <> ? OR ? IS NULL)`,
+                [...like, input.orderId || null, input.orderId || null],
+            );
+            settledCount = Number(histRow?.n || 0);
+        }
+        if (settledCount >= 3) {
+            push('returning_customer_3plus', 'Trusted returning customer', `${settledCount} settled orders`);
+        } else if (settledCount >= 1) {
+            push('returning_customer_2', 'Returning customer', `${settledCount} settled order(s)`);
+        } else if (input.orderValuePence > cfg.requireEmailVerificationAbovePence) {
             push('new_customer_high_value', 'First order, high value',
                 `first order at £${(input.orderValuePence / 100).toFixed(2)}`);
         }
@@ -391,7 +477,7 @@ export class FraudPreventionService implements OnModuleInit {
             }
         }
 
-        const score = Math.min(signals.reduce((s, x) => s + x.points, 0), 100);
+        const score = Math.max(0, Math.min(signals.reduce((s, x) => s + x.points, 0), 100));
         let level: RiskLevel = 'low';
         if (score >= cfg.blockThreshold) level = 'blocked';
         else if (score >= cfg.reviewThreshold) level = 'review';
@@ -687,6 +773,124 @@ export class FraudPreventionService implements OnModuleInit {
         });
     }
 
+    // ── IP intelligence cache ──────────────────────────────────────────
+    private async getIpIntel(ip: string): Promise<IpIntel> {
+        const rows = await this.db.query(
+            `SELECT * FROM fraud_ip_intel WHERE ip = ? AND checkedAt > DATE_SUB(NOW(), INTERVAL 30 DAY)`,
+            [ip],
+        ).catch(() => []);
+        if (rows.length) {
+            return {
+                ip, countryCode: rows[0].countryCode || null,
+                isVpnOrProxy: !!rows[0].isVpnOrProxy, isHosting: !!rows[0].isHosting, resolved: true,
+            };
+        }
+        const intel = await lookupIpIntel(ip);
+        if (intel.resolved) {
+            await this.db.query(
+                `INSERT INTO fraud_ip_intel (ip, countryCode, isVpnOrProxy, isHosting, checkedAt)
+                 VALUES (?, ?, ?, ?, NOW())
+                 ON DUPLICATE KEY UPDATE countryCode=VALUES(countryCode), isVpnOrProxy=VALUES(isVpnOrProxy),
+                    isHosting=VALUES(isHosting), checkedAt=NOW()`,
+                [intel.ip, intel.countryCode, intel.isVpnOrProxy ? 1 : 0, intel.isHosting ? 1 : 0],
+            ).catch(() => undefined);
+        }
+        return intel;
+    }
+
+    // ── Customer dossier (Lookup tab) ──────────────────────────────────
+    async customerProfile(email: string): Promise<any> {
+        const norm = normalizeEmail(email);
+        if (!norm) return { error: 'invalid email' };
+        const like = norm.canonical === norm.email ? [norm.email] : [norm.email, norm.canonical];
+        const ph = like.map(() => '?').join(',');
+
+        const [totals] = await this.db.query(
+            `SELECT COUNT(*) AS orders,
+                    COALESCE(SUM(o.subTotalWithTax), 0) AS lifetimeValue,
+                    SUM(o.state IN ('PaymentSettled','Delivered')) AS settled,
+                    SUM(o.state = 'Cancelled') AS cancelled,
+                    MIN(o.orderPlacedAt) AS firstOrder, MAX(o.orderPlacedAt) AS lastOrder
+             FROM \`order\` o JOIN customer c ON c.id = o.customerId
+             WHERE LOWER(c.emailAddress) IN (${ph})`, like,
+        );
+        const recentOrders = await this.db.query(
+            `SELECT o.code, o.state, o.subTotalWithTax, o.orderPlacedAt, o.customFieldsIp AS ip
+             FROM \`order\` o JOIN customer c ON c.id = o.customerId
+             WHERE LOWER(c.emailAddress) IN (${ph})
+             ORDER BY o.orderPlacedAt DESC LIMIT 10`, like,
+        );
+        const [failedPayments] = await this.db.query(
+            `SELECT COUNT(*) AS n FROM payment p
+             JOIN \`order\` o ON o.id = p.orderId JOIN customer c ON c.id = o.customerId
+             WHERE LOWER(c.emailAddress) IN (${ph}) AND p.state IN ('Declined','Error','Cancelled')`, like,
+        );
+        const cases = await this.db.query(
+            `SELECT id, orderCode, riskScore, status, createdAt, reviewNotes
+             FROM fraud_blocked_orders WHERE email IN (${ph}) ORDER BY createdAt DESC LIMIT 10`, like,
+        ).catch(() => []);
+        const logRows = await this.db.query(
+            `SELECT createdAt, orderCode, riskScore, riskLevel, action FROM fraud_log
+             WHERE email IN (${ph}) ORDER BY createdAt DESC LIMIT 10`, like,
+        ).catch(() => []);
+        const onAllowlist = await this.isAllowlisted(norm.email, norm.domain, undefined);
+        const blocked = await this.db.query(
+            `SELECT id FROM fraud_blocklist
+             WHERE (listType = 'email' AND value = ?) OR (listType = 'email_domain' AND value = ?) LIMIT 1`,
+            [norm.email, norm.domain],
+        ).catch(() => []);
+
+        return {
+            email: norm.email, canonical: norm.canonical, domain: norm.domain,
+            usedPlusAddressing: norm.usedPlusAddressing,
+            totals: totals || {}, recentOrders,
+            failedPayments: Number(failedPayments?.n || 0),
+            cases, log: logRows,
+            onAllowlist, onBlocklist: blocked.length > 0,
+        };
+    }
+
+    // ── Auto-release (weekend safety valve) ────────────────────────────
+    async autoReleaseStale(): Promise<number> {
+        const configs = await this.db.query(
+            `SELECT channelId, autoApproveAfterHours FROM fraud_config WHERE autoApproveAfterHours > 0`,
+        ).catch(() => []);
+        let released = 0;
+        for (const cfg of configs) {
+            const stale = await this.db.query(
+                `SELECT id FROM fraud_blocked_orders
+                 WHERE status = 'pending' AND channelId = ?
+                   AND createdAt < DATE_SUB(NOW(), INTERVAL ? HOUR)`,
+                [cfg.channelId, cfg.autoApproveAfterHours],
+            ).catch(() => []);
+            for (const row of stale) {
+                const r = await this.resolveCase(Number(row.id), 'approved',
+                    `auto-approved after ${cfg.autoApproveAfterHours}h unreviewed`);
+                if (r.ok) {
+                    released++;
+                    Logger.warn(`Fraud case #${row.id} auto-approved after ${cfg.autoApproveAfterHours}h`, loggerCtx);
+                }
+            }
+        }
+        return released;
+    }
+
+    // ── Slack ──────────────────────────────────────────────────────────
+    async sendSlackAlert(text: string): Promise<void> {
+        try {
+            const rows = await this.db.query(`SELECT slackWebhookUrl FROM fraud_notification_config LIMIT 1`).catch(() => []);
+            const url = rows[0]?.slackWebhookUrl;
+            if (!url || !/^https:\/\/hooks\.slack\.com\//.test(url)) return;
+            await fetch(url, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ text }),
+            });
+        } catch (e: any) {
+            Logger.debug(`Slack alert failed: ${e.message}`, loggerCtx);
+        }
+    }
+
     // ── Notifications ──────────────────────────────────────────────────
     async getNotificationConfig(): Promise<any> {
         const rows = await this.db.query(`SELECT * FROM fraud_notification_config LIMIT 1`).catch(() => []);
@@ -696,17 +900,19 @@ export class FraudPreventionService implements OnModuleInit {
             notifyOnBlocked: rows[0] ? !!rows[0].notifyOnBlocked : true,
             notifyOnHighRisk: rows[0] ? !!rows[0].notifyOnHighRisk : true,
             notifyOnApproval: rows[0] ? !!rows[0].notifyOnApproval : true,
+            slackWebhookUrl: rows[0]?.slackWebhookUrl || '',
             smtpConfigured: !!smtp,
         };
     }
 
     async saveNotificationConfig(body: any): Promise<void> {
         await this.db.query(
-            `INSERT INTO fraud_notification_config (id, adminEmail, notifyOnBlocked, notifyOnHighRisk, notifyOnApproval)
-             VALUES (1, ?, ?, ?, ?)
+            `INSERT INTO fraud_notification_config (id, adminEmail, notifyOnBlocked, notifyOnHighRisk, notifyOnApproval, slackWebhookUrl)
+             VALUES (1, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE adminEmail=VALUES(adminEmail), notifyOnBlocked=VALUES(notifyOnBlocked),
-                notifyOnHighRisk=VALUES(notifyOnHighRisk), notifyOnApproval=VALUES(notifyOnApproval)`,
-            [body.adminEmail || '', body.notifyOnBlocked ? 1 : 0, body.notifyOnHighRisk ? 1 : 0, body.notifyOnApproval ? 1 : 0],
+                notifyOnHighRisk=VALUES(notifyOnHighRisk), notifyOnApproval=VALUES(notifyOnApproval),
+                slackWebhookUrl=VALUES(slackWebhookUrl)`,
+            [body.adminEmail || '', body.notifyOnBlocked ? 1 : 0, body.notifyOnHighRisk ? 1 : 0, body.notifyOnApproval ? 1 : 0, body.slackWebhookUrl || null],
         );
     }
 

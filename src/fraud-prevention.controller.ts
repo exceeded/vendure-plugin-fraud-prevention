@@ -153,10 +153,19 @@ export class FraudPreventionController {
             email: body.email || undefined,
             orderValuePence: Number(body.orderValuePence || 0),
             countryCode: body.countryCode || undefined,
+            shippingCountryCode: body.shippingCountryCode || undefined,
             isReturningCustomer: body.isReturningCustomer,
             dryRun: true,
         });
         return res.json(assessment);
+    }
+
+    // ── Admin: customer dossier (Lookup tab) ───────────────────────────
+    @Get('customer-profile')
+    async customerProfile(@Ctx() ctx: RequestContext, @Res() res: Response, @Query('email') email?: string) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        if (!email) return res.status(400).json({ error: 'email required' });
+        return res.json(await this.service.customerProfile(email));
     }
 
     // ── Admin: lists ───────────────────────────────────────────────────

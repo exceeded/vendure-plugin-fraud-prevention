@@ -1,6 +1,6 @@
 {
   "name": "@huloglobal/vendure-plugin-fraud-prevention",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Full fraud-prevention suite for Vendure: signal-based risk scoring (velocity, disposable emails, block/allow lists, CIDR ranges, high-risk countries, failed-payment patterns), real server-side enforcement with monitor/enforce modes, a manual review queue with approve/reject workflow, public threat-feed sync (FireHOL, Spamhaus DROP, Tor exits, disposable-email domains), and a multi-tab admin dashboard.",
   "license": "AGPL-3.0-or-later",
   "author": "Wayne Garrison <wayne@garrison.me.uk>",

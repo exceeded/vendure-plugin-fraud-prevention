@@ -56,6 +56,9 @@ export interface FraudChannelConfig {
     // Failed payments
     maxFailedPaymentsPerIpPerHour: number;
     cooldownMinutesAfterFailedPayment: number;
+    /** Auto-approve pending cases after N hours (0 = never). Weekend
+     *  safety valve so held orders don't strand while nobody reviews. */
+    autoApproveAfterHours: number;
     /** JSON map of signal key -> points override. Empty = defaults. */
     signalWeights: Record<string, number>;
 }
@@ -63,6 +66,15 @@ export interface FraudChannelConfig {
 /** Default signal weights — overridable per channel via signalWeights. */
 export const DEFAULT_WEIGHTS: Record<string, number> = {
     disposable_email: 50,
+    vpn_proxy: 35,
+    hosting_ip: 30,
+    geo_mismatch: 30,
+    email_no_mx: 45,
+    identity_fanout: 45,
+    gibberish_email: 10,
+    country_mismatch: 10,
+    returning_customer_2: -12,
+    returning_customer_3plus: -25,
     blocklist_email: 60,
     blocklist_email_domain: 45,
     blocklist_ip: 55,
@@ -98,6 +110,7 @@ export const DEFAULT_CONFIG: Omit<FraudChannelConfig, 'channelId' | 'channelCode
     enforce3dSecure: true,
     maxFailedPaymentsPerIpPerHour: 3,
     cooldownMinutesAfterFailedPayment: 15,
+    autoApproveAfterHours: 0,
     signalWeights: {},
 };
 
