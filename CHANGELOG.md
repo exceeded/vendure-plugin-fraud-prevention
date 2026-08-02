@@ -5,6 +5,17 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-08-02
+
+### Fixed
+- **Review queue froze the browser tab** ("page unresponsive") when
+  toggling the per-case "email customer" / "blocklist" checkboxes. The
+  checkboxes bound to method calls (`[ngModel]="caseNotify(id)"`) which
+  Angular re-evaluated every change-detection pass. The per-case ticks
+  are now seeded from the global defaults when cases load and bound to
+  plain state. The Settings integrations list likewise iterates a stable
+  array instead of one rebuilt each cycle.
+
 ## [0.4.0] — 2026-08-02
 
 ### Added

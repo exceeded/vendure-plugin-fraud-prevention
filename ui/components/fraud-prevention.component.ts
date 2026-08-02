@@ -428,10 +428,10 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                             <input class="form-input notes-input" placeholder="notes…" [(ngModel)]="caseNotes[c.id]">
                                             <span class="case-opts">
                                                 <label class="check-label check-sm" title="Send the customer your approved / rejected message. Untick to resolve silently.">
-                                                    <input type="checkbox" [ngModel]="caseNotify(c.id)" (ngModelChange)="caseNotifyOverride[c.id] = $event"> email customer
+                                                    <input type="checkbox" [(ngModel)]="caseNotifyOverride[c.id]"> email customer
                                                 </label>
                                                 <label class="check-label check-sm" title="On reject: silently blocklist this email + IP so future attempts stop at the door. Defaults to your global setting.">
-                                                    <input type="checkbox" [ngModel]="caseBlock(c.id)" (ngModelChange)="caseBlocklist[c.id] = $event"> blocklist
+                                                    <input type="checkbox" [(ngModel)]="caseBlocklist[c.id]"> blocklist
                                                 </label>
                                             </span>
                                             <button class="gbtn gbtn-primary gbtn-sm" (click)="resolveCase(c, 'approve')" [disabled]="busyCase === c.id">Approve</button>
@@ -684,13 +684,13 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                         <h3 class="step-title">Notifications</h3>
                         <p class="hint">Where alerts go when an order is held, approved or rejected. Connect as many channels as you like — every event pings all of them.</p>
                         <div class="integrations" *ngIf="notif">
-                            <div class="integ-row" *ngFor="let ch of integrationDefs()">
+                            <div class="integ-row" *ngFor="let ch of integrations">
                                 <button class="integ-head" (click)="integOpen = integOpen === ch.key ? '' : ch.key" [attr.aria-expanded]="integOpen === ch.key">
                                     <span class="integ-icon" aria-hidden="true">{{ ch.icon }}</span>
                                     <span class="integ-name">{{ ch.name }}</span>
                                     <span class="integ-desc">{{ ch.description }}</span>
-                                    <span class="status-dot" [class.on]="ch.configured()" aria-hidden="true"></span>
-                                    <span class="integ-state">{{ ch.configured() ? 'Connected' : 'Off' }}</span>
+                                    <span class="status-dot" [class.on]="isConfigured(ch.key)" aria-hidden="true"></span>
+                                    <span class="integ-state">{{ isConfigured(ch.key) ? 'Connected' : 'Off' }}</span>
                                     <span class="integ-chev" aria-hidden="true">{{ integOpen === ch.key ? '▾' : '▸' }}</span>
                                 </button>
                                 <div class="integ-body" *ngIf="integOpen === ch.key">
@@ -1187,6 +1187,15 @@ export class FraudPreventionComponent implements OnInit {
           values: { reviewThreshold: 30, blockThreshold: 55, maxOrdersPerIpPerHour: 3, maxOrdersPerIpPerDay: 12, maxOrdersPerEmailPerDay: 6, maxOrderValuePence: 250000, maxDailyValuePerEmailPence: 600000, requireEmailVerificationAbovePence: 50000 } },
     ];
 
+    integrations = [
+        { key: 'email', name: 'Email', icon: '✉️', description: 'Admin alerts + customer approval notices via your SMTP' },
+        { key: 'slack', name: 'Slack', icon: '💬', description: 'Incoming-webhook message per case event' },
+        { key: 'discord', name: 'Discord', icon: '🎮', description: 'Channel webhook message per case event' },
+        { key: 'teams', name: 'Teams', icon: '🏢', description: 'Microsoft Teams incoming webhook' },
+        { key: 'telegram', name: 'Telegram', icon: '📱', description: 'Bot message to a chat or group' },
+        { key: 'webhook', name: 'Webhook', icon: '🔗', description: 'Signed JSON POST for your own systems' },
+    ];
+
     templates: any = null;
     templateKinds = [
         { key: 'held' as const, label: 'Order held' },
@@ -1327,34 +1336,42 @@ export class FraudPreventionComponent implements OnInit {
     }
 
     // ── Review queue ───────────────────────────────────────────────
-    caseNotify(id: number): boolean {
-        if (this.caseNotifyOverride[id] !== undefined) return this.caseNotifyOverride[id];
-        return this.notif ? !!(this.notif.notifyOnApproval || this.notif.notifyOnRejection) : true;
-    }
-
-    caseBlock(id: number): boolean {
-        if (this.caseBlocklist[id] !== undefined) return this.caseBlocklist[id];
-        return this.notif ? !!this.notif.blocklistOnReject : false;
-    }
-
     loadCases() {
-        if (!this.notif) this.loadNotif();
-        const q = this.caseFilter ? `?status=${this.caseFilter}` : '';
-        this.http.get<any[]>(`/fraud-prevention/cases${q}`).subscribe({
-            next: rows => {
-                this.cases = rows;
-                if (this.caseFilter === 'pending') this.pendingCount = rows.length;
-                this.cdr.markForCheck();
-            },
-            error: () => undefined,
-        });
+        const run = () => {
+            const q = this.caseFilter ? `?status=${this.caseFilter}` : '';
+            this.http.get<any[]>(`/fraud-prevention/cases${q}`).subscribe({
+                next: rows => {
+                    this.cases = rows;
+                    // Seed the per-case ticks from the global defaults once, so
+                    // the checkboxes bind to plain state (no method-in-binding).
+                    const notifyDefault = this.notif ? !!(this.notif.notifyOnApproval || this.notif.notifyOnRejection) : true;
+                    const blockDefault = this.notif ? !!this.notif.blocklistOnReject : false;
+                    for (const c of rows) {
+                        if (this.caseNotifyOverride[c.id] === undefined) this.caseNotifyOverride[c.id] = notifyDefault;
+                        if (this.caseBlocklist[c.id] === undefined) this.caseBlocklist[c.id] = blockDefault;
+                    }
+                    if (this.caseFilter === 'pending') this.pendingCount = rows.length;
+                    this.cdr.markForCheck();
+                },
+                error: () => undefined,
+            });
+        };
+        // Defaults come from notif; load it first if we don't have it yet.
+        if (!this.notif) {
+            this.http.get<any>('/fraud-prevention/notification-config').subscribe({
+                next: n => { this.notif = n; run(); },
+                error: () => run(),
+            });
+        } else {
+            run();
+        }
     }
 
     resolveCase(c: any, action: 'approve' | 'reject') {
         this.busyCase = c.id;
         const payload: any = { notes: this.caseNotes[c.id] || '' };
-        if (this.caseNotifyOverride[c.id] !== undefined) payload.notifyCustomer = this.caseNotifyOverride[c.id];
-        if (action === 'reject' && this.caseBlocklist[c.id] !== undefined) payload.blocklistIdentity = this.caseBlocklist[c.id];
+        payload.notifyCustomer = this.caseNotifyOverride[c.id] !== undefined ? this.caseNotifyOverride[c.id] : true;
+        if (action === 'reject') payload.blocklistIdentity = !!this.caseBlocklist[c.id];
         this.http.post<any>(`/fraud-prevention/cases/${c.id}/${action}`, payload).subscribe({
             next: r => {
                 this.busyCase = null;
@@ -1511,22 +1528,17 @@ export class FraudPreventionComponent implements OnInit {
         return 'custom';
     }
 
-    integrationDefs() {
+    isConfigured(key: string): boolean {
         const n = this.notif || {};
-        return [
-            { key: 'email', name: 'Email', icon: '✉️', description: 'Admin alerts + customer approval notices via your SMTP',
-              configured: () => !!(n.smtpConfigured && n.adminEmail) },
-            { key: 'slack', name: 'Slack', icon: '💬', description: 'Incoming-webhook message per case event',
-              configured: () => !!n.slackWebhookUrl },
-            { key: 'discord', name: 'Discord', icon: '🎮', description: 'Channel webhook message per case event',
-              configured: () => !!n.discordWebhookUrl },
-            { key: 'teams', name: 'Teams', icon: '🏢', description: 'Microsoft Teams incoming webhook',
-              configured: () => !!n.teamsWebhookUrl },
-            { key: 'telegram', name: 'Telegram', icon: '📱', description: 'Bot message to a chat or group',
-              configured: () => !!(n.telegramBotToken && n.telegramChatId) },
-            { key: 'webhook', name: 'Webhook', icon: '🔗', description: 'Signed JSON POST for your own systems',
-              configured: () => !!n.genericWebhookUrl },
-        ];
+        switch (key) {
+            case 'email': return !!(n.smtpConfigured && n.adminEmail);
+            case 'slack': return !!n.slackWebhookUrl;
+            case 'discord': return !!n.discordWebhookUrl;
+            case 'teams': return !!n.teamsWebhookUrl;
+            case 'telegram': return !!(n.telegramBotToken && n.telegramChatId);
+            case 'webhook': return !!n.genericWebhookUrl;
+            default: return false;
+        }
     }
 
     // ── Lookup ─────────────────────────────────────────────────────
