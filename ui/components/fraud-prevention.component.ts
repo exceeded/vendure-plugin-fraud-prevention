@@ -41,8 +41,9 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                 <div class="hulo-hero-logo" aria-hidden="true">
                     <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
                         <rect width="64" height="64" rx="14" fill="#0f1419"/>
-                        <path d="M32 10 L50 17 V31 C50 43 42.5 51.5 32 55 C21.5 51.5 14 43 14 31 V17 Z" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linejoin="round"/>
-                        <polyline points="24,32 30,38 41,25" fill="none" stroke="#f59e0b" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M32 9 L51 16.5 V30.5 C51 43.5 43 52.5 32 56 C21 52.5 13 43.5 13 30.5 V16.5 Z" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round"/>
+                        <polyline points="17,33 24.5,33 27.5,25 32.5,41 36,29 38.5,33 47,33" fill="none" stroke="#f59e0b" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+                        <circle cx="47" cy="33" r="2.6" fill="#f59e0b"/>
                     </svg>
                 </div>
                 <div class="hulo-hero-text">
@@ -710,7 +711,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                         </div>
                                         <ng-container *ngSwitchCase="'telegram'">
                                             <div class="form-row">
-                                                <label>Bot token <small>(from @BotFather)</small></label>
+                                                <label>Bot token <small>(from <small>(from @BotFather)</small>#64;BotFather)</small></label>
                                                 <input class="form-input mono" [(ngModel)]="notif.telegramBotToken" (ngModelChange)="notifDirty = true" placeholder="123456:ABC-…">
                                             </div>
                                             <div class="form-row">

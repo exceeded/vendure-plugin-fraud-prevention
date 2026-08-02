@@ -5,6 +5,16 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-08-02
+
+### Fixed
+- Admin UI failed to compile under Angular 17+ block syntax: the literal
+  `@BotFather` in the Telegram help text is now the `&#64;` entity.
+
+### Changed
+- New logo: shield + amber pulse trace (live risk monitoring), also used
+  in the admin hero.
+
 ## [0.3.1] — 2026-08-02
 
 ### Changed
