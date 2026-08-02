@@ -5,6 +5,21 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-08-02
+
+### Fixed
+- **Webhook integration row showed nothing, Telegram row was wrong.** A
+  regex repair back in 0.3.3 over-matched and deleted the Telegram chat-ID
+  field and the entire Webhook case, leaving the Telegram row bound to the
+  webhook secret. Both integration rows are restored: Telegram (bot token
+  + chat ID) and Webhook (URL + signing secret).
+
+### Added
+- **Customer messages: multi-select + bulk reset.** Each of the three
+  templates (held / approved / rejected) shows a default / customised
+  badge; tick any combination and "Reset selected to default", or "Reset
+  all to default" in one click. Per-template reset stays.
+
 ## [0.4.1] — 2026-08-02
 
 ### Fixed

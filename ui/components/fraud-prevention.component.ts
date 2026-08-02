@@ -722,6 +722,20 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                         <ng-container *ngSwitchCase="'telegram'">
                                             <div class="form-row">
                                                 <label>Bot token <small>(from &#64;BotFather)</small></label>
+                                                <input class="form-input mono" [(ngModel)]="notif.telegramBotToken" (ngModelChange)="notifDirty = true" placeholder="123456:ABC-…">
+                                            </div>
+                                            <div class="form-row">
+                                                <label>Chat ID</label>
+                                                <input class="form-input mono" [(ngModel)]="notif.telegramChatId" (ngModelChange)="notifDirty = true" placeholder="-1001234567890">
+                                            </div>
+                                        </ng-container>
+                                        <ng-container *ngSwitchCase="'webhook'">
+                                            <div class="form-row">
+                                                <label>URL <small>(receives a JSON POST per event)</small></label>
+                                                <input class="form-input" [(ngModel)]="notif.genericWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://your-system/hooks/fraud">
+                                            </div>
+                                            <div class="form-row">
+                                                <label>Signing secret <small>(optional — HMAC-SHA256 in X-Hulo-Signature)</small></label>
                                                 <input class="form-input mono" [(ngModel)]="notif.genericWebhookSecret" (ngModelChange)="notifDirty = true" placeholder="optional">
                                             </div>
                                         </ng-container>
@@ -740,8 +754,19 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     <div class="card-block">
                         <h3 class="step-title">Customer messages <small>({{ current.channelCode }})</small></h3>
                         <p class="hint">What gated customers hear, in your voice. Plain text — blank lines become paragraphs. Variables: <code class="mono">{{ '{' }}{{ '{' }}orderCode{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}firstName{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}supportEmail{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}reviewHours{{ '}' }}{{ '}' }}</code></p>
-                        <div class="mode-seg" style="margin-bottom:14px">
-                            <button *ngFor="let k of templateKinds" class="seg" [class.active]="tplKind === k.key" (click)="tplKind = k.key">{{ k.label }}</button>
+                        <div class="tpl-list" *ngIf="templates">
+                            <div class="tpl-list-row" *ngFor="let k of templateKinds">
+                                <input type="checkbox" [(ngModel)]="tplSelected[k.key]" [attr.aria-label]="'Select ' + k.label + ' template'">
+                                <button class="tpl-pick" [class.active]="tplKind === k.key" (click)="tplKind = k.key">
+                                    <span>{{ k.label }}</span>
+                                    <span class="mini-chip" *ngIf="templates[k.key]?.isDefault">default</span>
+                                    <span class="mini-chip custom" *ngIf="!templates[k.key]?.isDefault">customised</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="picker" style="margin:0 0 14px">
+                            <button class="gbtn gbtn-ghost gbtn-sm" (click)="resetSelected()" [disabled]="!anyTplSelected">Reset selected to default</button>
+                            <button class="gbtn gbtn-ghost gbtn-sm" (click)="resetAllTemplates()">Reset all to default</button>
                         </div>
                         <div *ngIf="templates && templates[tplKind]">
                             <div class="form-row">
@@ -1057,6 +1082,19 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
             color: var(--gb-strong); font-size: 13px;
         }
         .tpl-preview-subject { font-weight: 700; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--gb-line); }
+        .tpl-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+        .tpl-list-row { display: flex; align-items: center; gap: 10px; }
+        .tpl-list-row input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--gb-amber-edge); flex: 0 0 auto; }
+        .tpl-pick {
+            display: flex; align-items: center; gap: 10px; flex: 1;
+            padding: 9px 12px; border-radius: 8px; cursor: pointer; text-align: left;
+            border: 1px solid var(--gb-line); background: var(--gb-surface); color: var(--gb-strong);
+            font-size: 13px; font-weight: 600;
+        }
+        .tpl-pick:hover { border-color: var(--gb-amber-edge); }
+        .tpl-pick.active { border-color: var(--gb-amber-edge); box-shadow: 0 0 0 3px color-mix(in srgb, var(--gb-amber) 25%, transparent); }
+        .tpl-pick > span:first-child { flex: 1; }
+        .mini-chip.custom { border-color: var(--gb-line-info); }
         .integrations { border: 1px solid var(--gb-line); border-radius: 10px; overflow: hidden; }
         .integ-row + .integ-row { border-top: 1px solid var(--gb-line-soft); }
         .integ-head {
@@ -1205,6 +1243,8 @@ export class FraudPreventionComponent implements OnInit {
     tplKind: 'held' | 'approved' | 'rejected' = 'held';
     tplDirty = false;
     tplPreview: any = null;
+    tplSelected: Record<string, boolean> = {};
+    get anyTplSelected(): boolean { return this.templateKinds.some(k => this.tplSelected[k.key]); }
 
     constructor(
         private http: HttpClient,
@@ -1606,6 +1646,29 @@ export class FraudPreventionComponent implements OnInit {
         }).subscribe({
             next: () => { this.notification.success('Reset to default'); this.loadTemplates(); },
             error: () => this.notification.error('Reset failed'),
+        });
+    }
+
+    resetSelected() {
+        if (!this.current) return;
+        const kinds = this.templateKinds.filter(k => this.tplSelected[k.key]).map(k => k.key);
+        if (!kinds.length) return;
+        this.resetKinds(kinds, `${kinds.length} message(s) reset to default`);
+    }
+
+    resetAllTemplates() {
+        this.resetKinds(this.templateKinds.map(k => k.key), 'All messages reset to default');
+    }
+
+    private resetKinds(kinds: string[], successMsg: string) {
+        if (!this.current) return;
+        const channelId = this.current.channelId;
+        let done = 0;
+        kinds.forEach(kind => {
+            this.http.post('/fraud-prevention/templates', { channelId, kind, reset: true }).subscribe({
+                next: () => { if (++done === kinds.length) { this.tplSelected = {}; this.notification.success(successMsg); this.loadTemplates(); } },
+                error: () => { if (++done === kinds.length) this.loadTemplates(); this.notification.error('Some resets failed'); },
+            });
         });
     }
 
