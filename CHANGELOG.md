@@ -5,6 +5,28 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-02
+
+### Added
+- **Ops notification fan-out**: Slack, **Discord**, **Microsoft Teams**,
+  **Telegram** (bot token + chat id) and a **generic signed webhook**
+  (JSON POST, HMAC-SHA256 in `X-Hulo-Signature`) — every held, approved,
+  rejected and auto-released case pings all configured channels. Each
+  transport fails independently.
+- **Customisable customer messages, per channel**: the three gating
+  outcomes (held / approved / rejected) are now editable templates with
+  `{{orderCode}}`, `{{firstName}}`, `{{supportEmail}}` and
+  `{{reviewHours}}` variables, live preview and one-click reset. Bodies
+  are plain text (blank lines = paragraphs) so tone is editable without
+  HTML foot-guns. Defaults rewritten to be honest without being alarming
+  — a held order is "a quick security check", never an accusation, and a
+  rejection includes a human-appeal path.
+- **Hold-notice policy per channel**: tell the customer never / only at
+  block level (default) / on every held order; plus a configurable
+  `reviewHours` promise surfaced in the templates.
+- Auto-released cases now email the customer with the approved template
+  and post an ops event.
+
 ## [0.2.0] — 2026-08-02
 
 ### Added

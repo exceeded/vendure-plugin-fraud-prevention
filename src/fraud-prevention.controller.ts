@@ -114,14 +114,16 @@ export class FraudPreventionController {
         if (result.ok && result.caseRow?.email) {
             const notif = await this.service.getNotificationConfig();
             if (notif.notifyOnApproval) {
-                await this.service.sendCustomerNotice(
-                    result.caseRow.email,
-                    'Your order has been approved',
-                    `<h2>✅ Order approved</h2>
-                     <p>Your order <strong>${result.caseRow.orderCode || ''}</strong> passed verification
-                     and is being fulfilled now. Your licence keys are on their way.</p>`,
+                await this.service.sendCustomerTemplate(
+                    Number(result.caseRow.channelId), 'approved', result.caseRow.email,
+                    { orderCode: result.caseRow.orderCode },
                 );
             }
+            await this.service.notifyOps({
+                event: 'case.approved',
+                text: `✅ Fraud case approved — order ${result.caseRow.orderCode || ''} released`,
+                orderCode: result.caseRow.orderCode,
+            });
         }
         return res.json(result);
     }
@@ -131,14 +133,15 @@ export class FraudPreventionController {
         if (denyUnlessAdmin(ctx, res, true)) return;
         const result = await this.service.resolveCase(Number(id), 'rejected', body?.notes);
         if (result.ok && result.caseRow?.email) {
-            await this.service.sendCustomerNotice(
-                result.caseRow.email,
-                'Order update',
-                `<h2>Order update</h2>
-                 <p>Unfortunately we were unable to process your recent order
-                 <strong>${result.caseRow.orderCode || ''}</strong>. Any payment taken will be refunded.
-                 If you believe this is an error, please reply to this email and we'll help.</p>`,
+            await this.service.sendCustomerTemplate(
+                Number(result.caseRow.channelId), 'rejected', result.caseRow.email,
+                { orderCode: result.caseRow.orderCode },
             );
+            await this.service.notifyOps({
+                event: 'case.rejected',
+                text: `🚫 Fraud case rejected — order ${result.caseRow.orderCode || ''} cancelled`,
+                orderCode: result.caseRow.orderCode,
+            });
         }
         return res.json(result);
     }
@@ -166,6 +169,47 @@ export class FraudPreventionController {
         if (denyUnlessAdmin(ctx, res, false)) return;
         if (!email) return res.status(400).json({ error: 'email required' });
         return res.json(await this.service.customerProfile(email));
+    }
+
+    // ── Admin: customer message templates ──────────────────────────────
+    @Get('templates')
+    async getTemplates(@Ctx() ctx: RequestContext, @Res() res: Response, @Query('channelId') channelId?: string) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        return res.json(await this.service.getTemplates(Number(channelId || 1)));
+    }
+
+    @Post('templates')
+    async saveTemplates(
+        @Ctx() ctx: RequestContext, @Res() res: Response,
+        @Body() body: { channelId: number; kind: string; subject: string; body: string; reset?: boolean },
+    ) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        if (!['held', 'approved', 'rejected'].includes(body.kind)) {
+            return res.status(400).json({ error: 'bad kind' });
+        }
+        if (body.reset) {
+            await this.service.resetTemplate(Number(body.channelId), body.kind as any);
+        } else {
+            await this.service.saveTemplate(Number(body.channelId), body.kind as any, body.subject || '', body.body || '');
+        }
+        return res.json({ success: true });
+    }
+
+    @Post('templates/preview')
+    async previewTemplate(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: { subject: string; body: string; channelId?: number }) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        const { renderTemplate, textToHtml } = await import('./templates');
+        const notif = await this.service.getNotificationConfig();
+        const cfg = await this.service.getConfig(Number(body.channelId || 1));
+        const vars = {
+            orderCode: 'DEMO12345678', firstName: 'Sam',
+            supportEmail: notif.adminEmail || 'support@example.com',
+            reviewHours: (cfg as any).reviewHours ?? 24,
+        };
+        return res.json({
+            subject: renderTemplate(body.subject || '', vars),
+            html: textToHtml(renderTemplate(body.body || '', vars)),
+        });
     }
 
     // ── Admin: lists ───────────────────────────────────────────────────

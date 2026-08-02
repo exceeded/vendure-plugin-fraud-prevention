@@ -17,6 +17,8 @@ import {
 import { BUILTIN_DISPOSABLE_DOMAINS, FRAUD_SOURCES } from './fraud-sources';
 import { ipInCidr, normalizeEmail } from './net-util';
 import { domainHasMx, lookupIpIntel, looksGibberish, IpIntel } from './ip-intel';
+import { DEFAULT_TEMPLATES, MessageKind, renderTemplate, textToHtml } from './templates';
+import { fanOutOpsEvent, OpsEvent } from './ops-notify';
 
 const loggerCtx = 'FraudPrevention';
 
@@ -169,6 +171,21 @@ export class FraudPreventionService implements OnModuleInit {
                 notifyOnApproval TINYINT DEFAULT 1
             )`);
         await this.db.query(`ALTER TABLE fraud_notification_config ADD COLUMN IF NOT EXISTS slackWebhookUrl VARCHAR(512) NULL`);
+        for (const col of ['discordWebhookUrl VARCHAR(512)', 'teamsWebhookUrl VARCHAR(512)',
+                           'telegramBotToken VARCHAR(128)', 'telegramChatId VARCHAR(64)',
+                           'genericWebhookUrl VARCHAR(512)', 'genericWebhookSecret VARCHAR(128)']) {
+            await this.db.query(`ALTER TABLE fraud_notification_config ADD COLUMN IF NOT EXISTS ${col} NULL`);
+        }
+        await this.db.query(`ALTER TABLE fraud_config ADD COLUMN IF NOT EXISTS notifyCustomerOnHold VARCHAR(8) DEFAULT 'block'`);
+        await this.db.query(`ALTER TABLE fraud_config ADD COLUMN IF NOT EXISTS reviewHours INT DEFAULT 24`);
+        await this.db.query(`
+            CREATE TABLE IF NOT EXISTS fraud_message_templates (
+                channelId INT NOT NULL,
+                kind VARCHAR(16) NOT NULL,
+                subject VARCHAR(255),
+                body TEXT,
+                PRIMARY KEY (channelId, kind)
+            )`);
     }
 
     // ── Config ──────────────────────────────────────────────────────────
@@ -199,6 +216,8 @@ export class FraudPreventionService implements OnModuleInit {
             maxFailedPaymentsPerIpPerHour: row.maxFailedPaymentsPerIpPerHour ?? DEFAULT_CONFIG.maxFailedPaymentsPerIpPerHour,
             cooldownMinutesAfterFailedPayment: row.cooldownMinutesAfterFailedPayment ?? DEFAULT_CONFIG.cooldownMinutesAfterFailedPayment,
             autoApproveAfterHours: row.autoApproveAfterHours ?? 0,
+            notifyCustomerOnHold: (['never', 'block', 'always'].includes(row.notifyCustomerOnHold) ? row.notifyCustomerOnHold : 'block'),
+            reviewHours: row.reviewHours ?? 24,
             signalWeights: weights,
         };
     }
@@ -227,8 +246,8 @@ export class FraudPreventionService implements OnModuleInit {
                 maxOrdersPerIpPerHour, maxOrdersPerIpPerDay, maxOrdersPerEmailPerDay, maxDailyValuePerEmailPence,
                 maxOrderValuePence, requireEmailVerificationAbovePence, blockDisposableEmails, blockVpnProxy,
                 blockHighRiskCountries, highRiskCountries, enforce3dSecure, maxFailedPaymentsPerIpPerHour,
-                cooldownMinutesAfterFailedPayment, autoApproveAfterHours, signalWeights)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cooldownMinutesAfterFailedPayment, autoApproveAfterHours, notifyCustomerOnHold, reviewHours, signalWeights)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
                 enabled=VALUES(enabled), mode=VALUES(mode), reviewThreshold=VALUES(reviewThreshold),
                 blockThreshold=VALUES(blockThreshold), holdFulfilment=VALUES(holdFulfilment),
@@ -239,14 +258,16 @@ export class FraudPreventionService implements OnModuleInit {
                 blockHighRiskCountries=VALUES(blockHighRiskCountries), highRiskCountries=VALUES(highRiskCountries),
                 enforce3dSecure=VALUES(enforce3dSecure), maxFailedPaymentsPerIpPerHour=VALUES(maxFailedPaymentsPerIpPerHour),
                 cooldownMinutesAfterFailedPayment=VALUES(cooldownMinutesAfterFailedPayment),
-                autoApproveAfterHours=VALUES(autoApproveAfterHours), signalWeights=VALUES(signalWeights)`,
+                autoApproveAfterHours=VALUES(autoApproveAfterHours), notifyCustomerOnHold=VALUES(notifyCustomerOnHold),
+                reviewHours=VALUES(reviewHours), signalWeights=VALUES(signalWeights)`,
             [
                 c.channelId, c.enabled ? 1 : 0, c.mode, c.reviewThreshold, c.blockThreshold, c.holdFulfilment ? 1 : 0,
                 c.maxOrdersPerIpPerHour, c.maxOrdersPerIpPerDay, c.maxOrdersPerEmailPerDay, c.maxDailyValuePerEmailPence,
                 c.maxOrderValuePence, c.requireEmailVerificationAbovePence, c.blockDisposableEmails ? 1 : 0,
                 c.blockVpnProxy ? 1 : 0, c.blockHighRiskCountries ? 1 : 0, c.highRiskCountries || '',
                 c.enforce3dSecure ? 1 : 0, c.maxFailedPaymentsPerIpPerHour, c.cooldownMinutesAfterFailedPayment,
-                c.autoApproveAfterHours || 0, JSON.stringify(c.signalWeights || {}),
+                c.autoApproveAfterHours || 0, (c as any).notifyCustomerOnHold || 'block',
+                (c as any).reviewHours || 24, JSON.stringify(c.signalWeights || {}),
             ],
         );
     }
@@ -869,26 +890,85 @@ export class FraudPreventionService implements OnModuleInit {
                 if (r.ok) {
                     released++;
                     Logger.warn(`Fraud case #${row.id} auto-approved after ${cfg.autoApproveAfterHours}h`, loggerCtx);
+                    if (r.caseRow?.email) {
+                        await this.sendCustomerTemplate(Number(cfg.channelId), 'approved', r.caseRow.email,
+                            { orderCode: r.caseRow.orderCode }).catch(() => undefined);
+                    }
+                    await this.notifyOps({
+                        event: 'case.auto_released',
+                        text: `⏱ Fraud case #${row.id} (order ${r.caseRow?.orderCode || '?'}) auto-approved after ${cfg.autoApproveAfterHours}h unreviewed`,
+                        orderCode: r.caseRow?.orderCode,
+                    }).catch(() => undefined);
                 }
             }
         }
         return released;
     }
 
-    // ── Slack ──────────────────────────────────────────────────────────
-    async sendSlackAlert(text: string): Promise<void> {
+    // ── Ops notifications (Slack / Discord / Teams / Telegram / webhook) ─
+    async notifyOps(ev: OpsEvent): Promise<void> {
         try {
-            const rows = await this.db.query(`SELECT slackWebhookUrl FROM fraud_notification_config LIMIT 1`).catch(() => []);
-            const url = rows[0]?.slackWebhookUrl;
-            if (!url || !/^https:\/\/hooks\.slack\.com\//.test(url)) return;
-            await fetch(url, {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ text }),
-            });
+            const rows = await this.db.query(`SELECT * FROM fraud_notification_config LIMIT 1`).catch(() => []);
+            if (!rows.length) return;
+            await fanOutOpsEvent(rows[0], ev);
         } catch (e: any) {
-            Logger.debug(`Slack alert failed: ${e.message}`, loggerCtx);
+            Logger.debug(`Ops fan-out failed: ${e.message}`, loggerCtx);
         }
+    }
+
+    /** Back-compat alias for 0.2.0 callers. */
+    async sendSlackAlert(text: string): Promise<void> {
+        await this.notifyOps({ event: 'case.held', text });
+    }
+
+    // ── Customer message templates ─────────────────────────────────────
+    async getTemplates(channelId: number): Promise<Record<MessageKind, { subject: string; body: string; isDefault: boolean }>> {
+        const rows = await this.db.query(
+            `SELECT kind, subject, body FROM fraud_message_templates WHERE channelId = ?`, [channelId],
+        ).catch(() => []);
+        const out: any = {};
+        for (const kind of ['held', 'approved', 'rejected'] as MessageKind[]) {
+            const row = rows.find((r: any) => r.kind === kind);
+            out[kind] = row
+                ? { subject: row.subject, body: row.body, isDefault: false }
+                : { ...DEFAULT_TEMPLATES[kind], isDefault: true };
+        }
+        return out;
+    }
+
+    async saveTemplate(channelId: number, kind: MessageKind, subject: string, body: string): Promise<void> {
+        await this.db.query(
+            `INSERT INTO fraud_message_templates (channelId, kind, subject, body) VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE subject = VALUES(subject), body = VALUES(body)`,
+            [channelId, kind, subject, body],
+        );
+    }
+
+    async resetTemplate(channelId: number, kind: MessageKind): Promise<void> {
+        await this.db.query(
+            `DELETE FROM fraud_message_templates WHERE channelId = ? AND kind = ?`, [channelId, kind],
+        );
+    }
+
+    /** Render + send the customer message for a gating outcome. */
+    async sendCustomerTemplate(
+        channelId: number,
+        kind: MessageKind,
+        to: string,
+        vars: { orderCode?: string; firstName?: string },
+    ): Promise<void> {
+        const templates = await this.getTemplates(channelId);
+        const cfg = await this.getConfig(channelId);
+        const notif = await this.getNotificationConfig();
+        const allVars = {
+            orderCode: vars.orderCode || '',
+            firstName: vars.firstName || 'there',
+            supportEmail: notif.adminEmail || this.options.defaultAdminEmail || '',
+            reviewHours: cfg.reviewHours ?? 24,
+        };
+        const subject = renderTemplate(templates[kind].subject, allVars);
+        const bodyHtml = textToHtml(renderTemplate(templates[kind].body, allVars));
+        await this.sendCustomerNotice(to, subject, bodyHtml);
     }
 
     // ── Notifications ──────────────────────────────────────────────────
@@ -901,18 +981,32 @@ export class FraudPreventionService implements OnModuleInit {
             notifyOnHighRisk: rows[0] ? !!rows[0].notifyOnHighRisk : true,
             notifyOnApproval: rows[0] ? !!rows[0].notifyOnApproval : true,
             slackWebhookUrl: rows[0]?.slackWebhookUrl || '',
+            discordWebhookUrl: rows[0]?.discordWebhookUrl || '',
+            teamsWebhookUrl: rows[0]?.teamsWebhookUrl || '',
+            telegramBotToken: rows[0]?.telegramBotToken || '',
+            telegramChatId: rows[0]?.telegramChatId || '',
+            genericWebhookUrl: rows[0]?.genericWebhookUrl || '',
+            genericWebhookSecret: rows[0]?.genericWebhookSecret || '',
             smtpConfigured: !!smtp,
         };
     }
 
     async saveNotificationConfig(body: any): Promise<void> {
         await this.db.query(
-            `INSERT INTO fraud_notification_config (id, adminEmail, notifyOnBlocked, notifyOnHighRisk, notifyOnApproval, slackWebhookUrl)
-             VALUES (1, ?, ?, ?, ?, ?)
+            `INSERT INTO fraud_notification_config (id, adminEmail, notifyOnBlocked, notifyOnHighRisk, notifyOnApproval,
+                slackWebhookUrl, discordWebhookUrl, teamsWebhookUrl, telegramBotToken, telegramChatId,
+                genericWebhookUrl, genericWebhookSecret)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE adminEmail=VALUES(adminEmail), notifyOnBlocked=VALUES(notifyOnBlocked),
                 notifyOnHighRisk=VALUES(notifyOnHighRisk), notifyOnApproval=VALUES(notifyOnApproval),
-                slackWebhookUrl=VALUES(slackWebhookUrl)`,
-            [body.adminEmail || '', body.notifyOnBlocked ? 1 : 0, body.notifyOnHighRisk ? 1 : 0, body.notifyOnApproval ? 1 : 0, body.slackWebhookUrl || null],
+                slackWebhookUrl=VALUES(slackWebhookUrl), discordWebhookUrl=VALUES(discordWebhookUrl),
+                teamsWebhookUrl=VALUES(teamsWebhookUrl), telegramBotToken=VALUES(telegramBotToken),
+                telegramChatId=VALUES(telegramChatId), genericWebhookUrl=VALUES(genericWebhookUrl),
+                genericWebhookSecret=VALUES(genericWebhookSecret)`,
+            [body.adminEmail || '', body.notifyOnBlocked ? 1 : 0, body.notifyOnHighRisk ? 1 : 0, body.notifyOnApproval ? 1 : 0,
+             body.slackWebhookUrl || null, body.discordWebhookUrl || null, body.teamsWebhookUrl || null,
+             body.telegramBotToken || null, body.telegramChatId || null,
+             body.genericWebhookUrl || null, body.genericWebhookSecret || null],
         );
     }
 

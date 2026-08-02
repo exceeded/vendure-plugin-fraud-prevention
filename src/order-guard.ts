@@ -78,10 +78,16 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
             loggerCtx,
         );
 
-        await this.service.sendSlackAlert(
-            `:rotating_light: Order *${order.code}* held for review — score ${assessment.score}/100 (${assessment.level}). ` +
-            assessment.signals.map(s => s.label).join(', '),
-        );
+        await this.service.notifyOps({
+            event: 'case.held',
+            text: `🚨 Order ${order.code} held for review — score ${assessment.score}/100 (${assessment.level}). ` +
+                assessment.signals.map(s => s.label).join(', '),
+            orderCode: order.code,
+            email,
+            score: assessment.score,
+            level: assessment.level,
+            signals: assessment.signals.map(s => ({ key: s.key, label: s.label, points: s.points })),
+        });
 
         const notif = await this.service.getNotificationConfig();
         const wantAdminMail = assessment.action === 'block' ? notif.notifyOnBlocked : notif.notifyOnHighRisk;
@@ -99,16 +105,15 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
             );
         }
 
-        if (assessment.action === 'block' && email) {
-            await this.service.sendCustomerNotice(
-                email,
-                'Your order is being verified',
-                `<h2>Order verification</h2>
-                 <p>Thanks for your order <strong>${order.code}</strong>. As part of our standard security
-                 checks it has been selected for a quick manual verification, which usually completes
-                 within a few business hours. You'll receive your licence keys as soon as it's approved —
-                 no action is needed from you.</p>`,
-            );
+        // Customer-facing held notice — per-channel policy + template.
+        const cfg = await this.service.getConfig(channelId);
+        const policy = (cfg as any).notifyCustomerOnHold || 'block';
+        const shouldTell = policy === 'always' || (policy === 'block' && assessment.action === 'block');
+        if (shouldTell && email) {
+            await this.service.sendCustomerTemplate(channelId, 'held', email, {
+                orderCode: order.code,
+                firstName: (order.customer as any)?.firstName || undefined,
+            });
         }
     }
 }

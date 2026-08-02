@@ -59,6 +59,11 @@ export interface FraudChannelConfig {
     /** Auto-approve pending cases after N hours (0 = never). Weekend
      *  safety valve so held orders don't strand while nobody reviews. */
     autoApproveAfterHours: number;
+    /** When to email the customer that their order is held:
+     *  never | block (only at block level) | always (every held order). */
+    notifyCustomerOnHold: 'never' | 'block' | 'always';
+    /** Advertised review turnaround, used as {{reviewHours}} in templates. */
+    reviewHours: number;
     /** JSON map of signal key -> points override. Empty = defaults. */
     signalWeights: Record<string, number>;
 }
@@ -111,6 +116,8 @@ export const DEFAULT_CONFIG: Omit<FraudChannelConfig, 'channelId' | 'channelCode
     maxFailedPaymentsPerIpPerHour: 3,
     cooldownMinutesAfterFailedPayment: 15,
     autoApproveAfterHours: 0,
+    notifyCustomerOnHold: 'block',
+    reviewHours: 24,
     signalWeights: {},
 };
 

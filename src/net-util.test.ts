@@ -78,3 +78,29 @@ describe('looksGibberish', () => {
         expect(looksGibberish('john1985')).toBe(false);
     });
 });
+
+import { renderTemplate, textToHtml, DEFAULT_TEMPLATES } from './templates';
+
+describe('renderTemplate', () => {
+    it('substitutes variables', () => {
+        expect(renderTemplate('Hi {{firstName}}, order {{orderCode}}', { firstName: 'Sam', orderCode: 'ABC' }))
+            .toBe('Hi Sam, order ABC');
+    });
+    it('renders unknown/missing vars as empty', () => {
+        expect(renderTemplate('x{{nope}}y', {})).toBe('xy');
+    });
+    it('default templates carry all their variables', () => {
+        for (const t of Object.values(DEFAULT_TEMPLATES)) {
+            const out = renderTemplate(t.body, { firstName: 'A', orderCode: 'B', supportEmail: 'c@d.e', reviewHours: 24 });
+            expect(out).not.toMatch(/\{\{/);
+        }
+    });
+});
+
+describe('textToHtml', () => {
+    it('escapes HTML and makes paragraphs', () => {
+        const html = textToHtml('para one <script>\n\npara two');
+        expect(html).toContain('&lt;script&gt;');
+        expect((html.match(/<p /g) || []).length).toBe(2);
+    });
+});

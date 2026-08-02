@@ -24,6 +24,8 @@ interface FraudConfig {
     maxFailedPaymentsPerIpPerHour: number;
     cooldownMinutesAfterFailedPayment: number;
     autoApproveAfterHours: number;
+    notifyCustomerOnHold: 'never' | 'block' | 'always';
+    reviewHours: number;
     signalWeights: Record<string, number>;
 }
 
@@ -286,6 +288,18 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                             <div class="form-row">
                                 <label>Auto-approve unreviewed cases after <small>(hours, 0 = never)</small></label>
                                 <input class="form-input" type="number" min="0" [(ngModel)]="current.autoApproveAfterHours" (ngModelChange)="markDirty()">
+                            </div>
+                            <div class="form-row">
+                                <label>Tell the customer their order is held</label>
+                                <select class="form-select" style="width:100%" [(ngModel)]="current.notifyCustomerOnHold" (ngModelChange)="markDirty()">
+                                    <option value="never">Never — review silently</option>
+                                    <option value="block">Only blocked-level holds (default)</option>
+                                    <option value="always">Every held order</option>
+                                </select>
+                            </div>
+                            <div class="form-row">
+                                <label>Promised review turnaround <small>(hours — used as {{ '{' }}{{ '{' }}reviewHours{{ '}' }}{{ '}' }} in messages)</small></label>
+                                <input class="form-input" type="number" min="1" [(ngModel)]="current.reviewHours" (ngModelChange)="markDirty()">
                             </div>
                         </div>
                     </div>
@@ -638,10 +652,38 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                             <label>Admin alert email</label>
                             <input class="form-input" [(ngModel)]="notif.adminEmail" (ngModelChange)="notifDirty = true" placeholder="you@company.com">
                         </div>
-                        <div class="form-row" *ngIf="notif">
-                            <label>Slack webhook <small>(optional — pings on every held order)</small></label>
-                            <input class="form-input" [(ngModel)]="notif.slackWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://hooks.slack.com/services/…">
+                        <h4 class="subsection-title" *ngIf="notif">Ops channels — every held / approved / rejected case pings all configured</h4>
+                        <div class="form-grid" *ngIf="notif">
+                            <div class="form-row">
+                                <label>Slack webhook</label>
+                                <input class="form-input" [(ngModel)]="notif.slackWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://hooks.slack.com/services/…">
+                            </div>
+                            <div class="form-row">
+                                <label>Discord webhook</label>
+                                <input class="form-input" [(ngModel)]="notif.discordWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://discord.com/api/webhooks/…">
+                            </div>
+                            <div class="form-row">
+                                <label>Microsoft Teams webhook</label>
+                                <input class="form-input" [(ngModel)]="notif.teamsWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://….webhook.office.com/…">
+                            </div>
+                            <div class="form-row">
+                                <label>Telegram bot token</label>
+                                <input class="form-input mono" [(ngModel)]="notif.telegramBotToken" (ngModelChange)="notifDirty = true" placeholder="123456:ABC-…">
+                            </div>
+                            <div class="form-row">
+                                <label>Telegram chat ID</label>
+                                <input class="form-input mono" [(ngModel)]="notif.telegramChatId" (ngModelChange)="notifDirty = true" placeholder="-1001234567890">
+                            </div>
+                            <div class="form-row">
+                                <label>Generic webhook URL <small>(JSON POST)</small></label>
+                                <input class="form-input" [(ngModel)]="notif.genericWebhookUrl" (ngModelChange)="notifDirty = true" placeholder="https://your-system/hooks/fraud">
+                            </div>
+                            <div class="form-row">
+                                <label>Webhook signing secret <small>(HMAC-SHA256 → X-Hulo-Signature)</small></label>
+                                <input class="form-input mono" [(ngModel)]="notif.genericWebhookSecret" (ngModelChange)="notifDirty = true" placeholder="optional">
+                            </div>
                         </div>
+                        <h4 class="subsection-title" *ngIf="notif">Email</h4>
                         <div class="form-grid" *ngIf="notif">
                             <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnBlocked" (ngModelChange)="notifDirty = true"> Email me when an order is held as blocked</label>
                             <label class="check-label"><input type="checkbox" [(ngModel)]="notif.notifyOnHighRisk" (ngModelChange)="notifDirty = true"> Email me when an order is held for review</label>
@@ -649,6 +691,36 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                         </div>
                         <div style="margin-top:14px">
                             <button class="gbtn gbtn-primary gbtn-sm" (click)="saveNotif()" [disabled]="!notifDirty">Save notification settings</button>
+                        </div>
+                    </div>
+                </div>
+            </vdr-page-block>
+            <vdr-page-block>
+                <div class="card">
+                    <div class="card-block">
+                        <h3 class="step-title">Customer messages <small>({{ current.channelCode }})</small></h3>
+                        <p class="hint">What gated customers hear, in your voice. Plain text — blank lines become paragraphs. Variables: <code class="mono">{{ '{' }}{{ '{' }}orderCode{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}firstName{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}supportEmail{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}reviewHours{{ '}' }}{{ '}' }}</code></p>
+                        <div class="mode-seg" style="margin-bottom:14px">
+                            <button *ngFor="let k of templateKinds" class="seg" [class.active]="tplKind === k.key" (click)="tplKind = k.key">{{ k.label }}</button>
+                        </div>
+                        <div *ngIf="templates && templates[tplKind]">
+                            <div class="form-row">
+                                <label>Subject <span class="mini-chip" *ngIf="templates[tplKind].isDefault">default</span></label>
+                                <input class="form-input" [(ngModel)]="templates[tplKind].subject" (ngModelChange)="tplDirty = true">
+                            </div>
+                            <div class="form-row">
+                                <label>Body</label>
+                                <textarea class="form-input" rows="10" style="max-width:100%;font-family:inherit" [(ngModel)]="templates[tplKind].body" (ngModelChange)="tplDirty = true"></textarea>
+                            </div>
+                            <div class="picker">
+                                <button class="gbtn gbtn-primary gbtn-sm" (click)="saveTemplate()" [disabled]="!tplDirty">Save message</button>
+                                <button class="gbtn gbtn-outline gbtn-sm" (click)="previewTemplate()">Preview</button>
+                                <button class="gbtn gbtn-ghost gbtn-sm" (click)="resetTemplate()" [disabled]="templates[tplKind].isDefault">Reset to default</button>
+                            </div>
+                            <div *ngIf="tplPreview" class="tpl-preview">
+                                <div class="tpl-preview-subject">{{ tplPreview.subject }}</div>
+                                <div [innerHTML]="tplPreview.html"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -931,6 +1003,18 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
         }
         .chip-x:hover { color: var(--gb-danger-ink); background: var(--gb-tint-bad); }
 
+        .subsection-title {
+            margin: 20px 0 10px; font-size: 11px; font-weight: 700;
+            letter-spacing: 0.06em; text-transform: uppercase; color: var(--gb-muted);
+        }
+        .subsection-title:first-of-type { margin-top: 4px; }
+        .tpl-preview {
+            margin-top: 14px; padding: 16px 18px; border-radius: 10px;
+            border: 1px dashed var(--gb-ui-border); background: var(--gb-surface-2);
+            color: var(--gb-strong); font-size: 13px;
+        }
+        .tpl-preview-subject { font-weight: 700; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--gb-line); }
+
         /* ── Simulate ─────────────────────────────────────────────── */
         .sim-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
         .sim-grid label { display: block; font-size: 12px; font-weight: 700; color: var(--gb-strong); margin-bottom: 4px; }
@@ -1029,6 +1113,16 @@ export class FraudPreventionComponent implements OnInit {
     lookupBusy = false;
     profile: any = null;
 
+    templates: any = null;
+    templateKinds = [
+        { key: 'held' as const, label: 'Order held' },
+        { key: 'approved' as const, label: 'Approved' },
+        { key: 'rejected' as const, label: 'Rejected' },
+    ];
+    tplKind: 'held' | 'approved' | 'rejected' = 'held';
+    tplDirty = false;
+    tplPreview: any = null;
+
     constructor(
         private http: HttpClient,
         private notification: NotificationService,
@@ -1081,7 +1175,7 @@ export class FraudPreventionComponent implements OnInit {
         if (tab === 'review') this.loadCases();
         if (tab === 'lists') this.loadLists();
         if (tab === 'activity') this.loadLog();
-        if (tab === 'settings') this.loadNotif();
+        if (tab === 'settings') { this.loadNotif(); this.loadTemplates(); }
     }
 
     // ── Config ─────────────────────────────────────────────────────
@@ -1344,6 +1438,48 @@ export class FraudPreventionComponent implements OnInit {
         this.http.get<any>('/fraud-prevention/notification-config').subscribe({
             next: n => { this.notif = n; this.notifDirty = false; this.cdr.markForCheck(); },
             error: () => undefined,
+        });
+    }
+
+    loadTemplates() {
+        if (!this.current) return;
+        this.tplPreview = null;
+        this.tplDirty = false;
+        this.http.get<any>(`/fraud-prevention/templates?channelId=${this.current.channelId}`).subscribe({
+            next: t => { this.templates = t; this.cdr.markForCheck(); },
+            error: () => undefined,
+        });
+    }
+
+    saveTemplate() {
+        if (!this.current || !this.templates) return;
+        const t = this.templates[this.tplKind];
+        this.http.post('/fraud-prevention/templates', {
+            channelId: this.current.channelId, kind: this.tplKind, subject: t.subject, body: t.body,
+        }).subscribe({
+            next: () => { this.tplDirty = false; this.notification.success('Message saved'); this.loadTemplates(); },
+            error: () => this.notification.error('Save failed'),
+        });
+    }
+
+    resetTemplate() {
+        if (!this.current) return;
+        this.http.post('/fraud-prevention/templates', {
+            channelId: this.current.channelId, kind: this.tplKind, reset: true,
+        }).subscribe({
+            next: () => { this.notification.success('Reset to default'); this.loadTemplates(); },
+            error: () => this.notification.error('Reset failed'),
+        });
+    }
+
+    previewTemplate() {
+        if (!this.current || !this.templates) return;
+        const t = this.templates[this.tplKind];
+        this.http.post<any>('/fraud-prevention/templates/preview', {
+            channelId: this.current.channelId, subject: t.subject, body: t.body,
+        }).subscribe({
+            next: p => { this.tplPreview = p; this.cdr.markForCheck(); },
+            error: () => this.notification.error('Preview failed'),
         });
     }
 
