@@ -170,6 +170,19 @@ export class FraudPreventionService implements OnModuleInit {
                 notifyOnHighRisk TINYINT DEFAULT 1,
                 notifyOnApproval TINYINT DEFAULT 1
             )`);
+        await this.db.query(`
+            CREATE TABLE IF NOT EXISTS fraud_custom_feed (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(120) NOT NULL,
+                url VARCHAR(1024) NOT NULL,
+                listType VARCHAR(20) NOT NULL DEFAULT 'ip',
+                enabled TINYINT NOT NULL DEFAULT 1,
+                lastSyncedAt DATETIME NULL,
+                lastCount INT NULL,
+                lastError VARCHAR(255) NULL,
+                createdAt DATETIME NOT NULL,
+                updatedAt DATETIME NOT NULL
+            )`);
         await this.db.query(`ALTER TABLE fraud_notification_config ADD COLUMN IF NOT EXISTS slackWebhookUrl VARCHAR(512) NULL`);
         await this.db.query(`ALTER TABLE fraud_notification_config ADD COLUMN IF NOT EXISTS notifyOnRejection TINYINT DEFAULT 1`);
         await this.db.query(`ALTER TABLE fraud_notification_config ADD COLUMN IF NOT EXISTS blocklistOnReject TINYINT DEFAULT 0`);
@@ -737,26 +750,7 @@ export class FraudPreventionService implements OnModuleInit {
         if (!source) return { success: false, entries: 0, message: 'Unknown source' };
         try {
             const data = await this.fetchUrl(source.url);
-            const lines = data.split('\n')
-                .map(l => l.trim())
-                // Spamhaus DROP lines look like "1.2.3.0/24 ; SBL12345" — keep the CIDR only.
-                .map(l => l.split(';')[0].trim())
-                .filter(l => l && !l.startsWith('#') && !l.startsWith('//'));
-
-            await this.db.query(`DELETE FROM fraud_blocklist WHERE source = ?`, [sourceKey]);
-
-            const batchSize = 500;
-            let inserted = 0;
-            for (let i = 0; i < lines.length; i += batchSize) {
-                const batch = lines.slice(i, i + batchSize);
-                const placeholders = batch.map(() => `(?, ?, ?, '', NOW(), NOW())`).join(',');
-                const params = batch.flatMap(v => [source.type, v.toLowerCase(), sourceKey]);
-                await this.db.query(
-                    `INSERT IGNORE INTO fraud_blocklist (listType, value, source, note, createdAt, updatedAt) VALUES ${placeholders}`,
-                    params,
-                );
-                inserted += batch.length;
-            }
+            const inserted = await this.parseAndStore(sourceKey, source.type, data);
             Logger.info(`Synced ${inserted} entries from ${source.name}`, loggerCtx);
             return { success: true, entries: inserted, message: `Synced ${inserted} entries from ${source.name}` };
         } catch (e: any) {
@@ -765,12 +759,126 @@ export class FraudPreventionService implements OnModuleInit {
         }
     }
 
+    /** Parse a line-based feed and replace this source's blocklist rows. */
+    private async parseAndStore(sourceKey: string, type: string, data: string): Promise<number> {
+        const lines = data.split('\n')
+            .map(l => l.trim())
+            // Spamhaus DROP lines look like "1.2.3.0/24 ; SBL12345" — keep the CIDR only.
+            .map(l => l.split(';')[0].split(/\s+/)[0].trim())
+            .filter(l => l && !l.startsWith('#') && !l.startsWith('//'));
+        await this.db.query(`DELETE FROM fraud_blocklist WHERE source = ?`, [sourceKey]);
+        const batchSize = 500;
+        let inserted = 0;
+        for (let i = 0; i < lines.length; i += batchSize) {
+            const batch = lines.slice(i, i + batchSize);
+            const placeholders = batch.map(() => `(?, ?, ?, '', NOW(), NOW())`).join(',');
+            const params = batch.flatMap(v => [type, v.toLowerCase(), sourceKey]);
+            await this.db.query(
+                `INSERT IGNORE INTO fraud_blocklist (listType, value, source, note, createdAt, updatedAt) VALUES ${placeholders}`,
+                params,
+            );
+            inserted += batch.length;
+        }
+        return inserted;
+    }
+
     async syncAll(): Promise<{ results: any[] }> {
         const results = [];
         for (const key of Object.keys(FRAUD_SOURCES)) {
             results.push({ source: key, ...(await this.syncSource(key)) });
         }
+        // User-defined feeds ride the same nightly sync.
+        for (const feed of await this.listCustomFeeds()) {
+            if (!feed.enabled) continue;
+            results.push({ source: `custom:${feed.id}`, name: feed.name, ...(await this.syncCustomFeed(feed.id)) });
+        }
         return { results };
+    }
+
+    // ── Custom (user-defined) feeds ─────────────────────────────────────
+    private customSourceKey(id: number): string { return `custom-${id}`; }
+
+    async listCustomFeeds(): Promise<any[]> {
+        return this.db.query(`SELECT * FROM fraud_custom_feed ORDER BY createdAt DESC`).catch(() => []);
+    }
+
+    async addCustomFeed(name: string, url: string, listType: string): Promise<{ ok: boolean; id?: number; message?: string }> {
+        const cleanName = String(name || '').trim().slice(0, 120);
+        const cleanUrl = String(url || '').trim().slice(0, 1024);
+        const type = ['ip', 'ip_range', 'email_domain', 'email'].includes(listType) ? listType : 'ip';
+        if (!cleanName) return { ok: false, message: 'A name is required.' };
+        const urlErr = this.validateFeedUrl(cleanUrl);
+        if (urlErr) return { ok: false, message: urlErr };
+        const res = await this.db.query(
+            `INSERT INTO fraud_custom_feed (name, url, listType, enabled, createdAt, updatedAt)
+             VALUES (?, ?, ?, 1, NOW(), NOW())`,
+            [cleanName, cleanUrl, type],
+        );
+        return { ok: true, id: res.insertId };
+    }
+
+    async updateCustomFeed(id: number, patch: { name?: string; url?: string; listType?: string; enabled?: boolean }): Promise<{ ok: boolean; message?: string }> {
+        const sets: string[] = [];
+        const params: any[] = [];
+        if (patch.name !== undefined) { sets.push('name = ?'); params.push(String(patch.name).trim().slice(0, 120)); }
+        if (patch.url !== undefined) {
+            const err = this.validateFeedUrl(String(patch.url).trim());
+            if (err) return { ok: false, message: err };
+            sets.push('url = ?'); params.push(String(patch.url).trim().slice(0, 1024));
+        }
+        if (patch.listType !== undefined && ['ip', 'ip_range', 'email_domain', 'email'].includes(patch.listType)) {
+            sets.push('listType = ?'); params.push(patch.listType);
+        }
+        if (typeof patch.enabled === 'boolean') { sets.push('enabled = ?'); params.push(patch.enabled ? 1 : 0); }
+        if (!sets.length) return { ok: true };
+        sets.push('updatedAt = NOW()');
+        params.push(id);
+        await this.db.query(`UPDATE fraud_custom_feed SET ${sets.join(', ')} WHERE id = ?`, params);
+        return { ok: true };
+    }
+
+    async removeCustomFeed(id: number): Promise<void> {
+        await this.db.query(`DELETE FROM fraud_blocklist WHERE source = ?`, [this.customSourceKey(id)]);
+        await this.db.query(`DELETE FROM fraud_custom_feed WHERE id = ?`, [id]);
+    }
+
+    async syncCustomFeed(id: number): Promise<{ success: boolean; entries: number; message: string }> {
+        const rows = await this.db.query(`SELECT * FROM fraud_custom_feed WHERE id = ?`, [id]);
+        const feed = rows[0];
+        if (!feed) return { success: false, entries: 0, message: 'Feed not found' };
+        try {
+            const data = await this.fetchUrl(feed.url);
+            const inserted = await this.parseAndStore(this.customSourceKey(id), feed.listType, data);
+            await this.db.query(
+                `UPDATE fraud_custom_feed SET lastSyncedAt = NOW(), lastCount = ?, lastError = NULL, updatedAt = NOW() WHERE id = ?`,
+                [inserted, id],
+            );
+            Logger.info(`Synced ${inserted} entries from custom feed "${feed.name}"`, loggerCtx);
+            return { success: true, entries: inserted, message: `Synced ${inserted} entries from ${feed.name}` };
+        } catch (e: any) {
+            await this.db.query(
+                `UPDATE fraud_custom_feed SET lastSyncedAt = NOW(), lastError = ?, updatedAt = NOW() WHERE id = ?`,
+                [String(e.message).slice(0, 255), id],
+            );
+            Logger.error(`Custom feed sync failed for "${feed.name}": ${e.message}`, loggerCtx);
+            return { success: false, entries: 0, message: `Failed: ${e.message}` };
+        }
+    }
+
+    /** Reject non-http(s) schemes and obvious internal targets (SSRF guard). */
+    private validateFeedUrl(url: string): string | null {
+        let u: URL;
+        try { u = new URL(url); } catch { return 'That doesn\'t look like a valid URL.'; }
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return 'Only http(s) feed URLs are supported.';
+        const host = u.hostname.toLowerCase();
+        const isPrivate =
+            host === 'localhost' || host.endsWith('.localhost') ||
+            /^127\./.test(host) || host === '::1' || host === '0.0.0.0' ||
+            /^10\./.test(host) || /^192\.168\./.test(host) ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+            /^169\.254\./.test(host) || /^fe80:/i.test(host) || /^f[cd][0-9a-f]{2}:/i.test(host);
+        if (isPrivate) return 'Internal / private addresses are not allowed for feed URLs.';
+        return null;
     }
 
     private fetchUrl(url: string, hops = 0): Promise<string> {
@@ -787,8 +895,14 @@ export class FraudPreventionService implements OnModuleInit {
                     res.resume();
                     return reject(new Error(`HTTP ${res.statusCode}`));
                 }
+                const MAX_BYTES = 30 * 1024 * 1024; // 30 MB cap
                 let data = '';
-                res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+                let bytes = 0;
+                res.on('data', (chunk: Buffer) => {
+                    bytes += chunk.length;
+                    if (bytes > MAX_BYTES) { req.destroy(); reject(new Error('Feed too large (>30 MB)')); return; }
+                    data += chunk.toString();
+                });
                 res.on('end', () => resolve(data));
             });
             req.on('error', reject);

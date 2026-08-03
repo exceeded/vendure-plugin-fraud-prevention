@@ -272,6 +272,49 @@ export class FraudPreventionController {
         return res.json({ success: true });
     }
 
+    // ── Custom feeds (user-defined threat-list URLs) ───────────────────
+    @Get('feeds/custom')
+    async customFeeds(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        return res.json(await this.service.listCustomFeeds());
+    }
+
+    @Post('feeds/custom')
+    async addCustomFeed(
+        @Ctx() ctx: RequestContext, @Res() res: Response,
+        @Body() body: { name: string; url: string; listType: string },
+    ) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        if (!FraudPreventionPlugin.isLicensed()) {
+            return res.status(402).json({ error: 'licence_required', message: 'Custom feeds require a licence.' });
+        }
+        const result = await this.service.addCustomFeed(body.name, body.url, body.listType);
+        return res.status(result.ok ? 200 : 400).json(result);
+    }
+
+    @Post('feeds/custom/:id')
+    async updateCustomFeed(
+        @Ctx() ctx: RequestContext, @Res() res: Response, @Param('id') id: string,
+        @Body() body: { name?: string; url?: string; listType?: string; enabled?: boolean; sync?: boolean },
+    ) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        if (body?.sync) {
+            if (!FraudPreventionPlugin.isLicensed()) {
+                return res.status(402).json({ error: 'licence_required', message: 'Feed sync requires a licence.' });
+            }
+            return res.json(await this.service.syncCustomFeed(Number(id)));
+        }
+        const result = await this.service.updateCustomFeed(Number(id), body);
+        return res.status(result.ok ? 200 : 400).json(result);
+    }
+
+    @Delete('feeds/custom/:id')
+    async removeCustomFeed(@Ctx() ctx: RequestContext, @Res() res: Response, @Param('id') id: string) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        await this.service.removeCustomFeed(Number(id));
+        return res.json({ ok: true });
+    }
+
     @Post('lists/sync')
     async sync(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: { sourceKey?: string }) {
         if (denyUnlessAdmin(ctx, res, true)) return;

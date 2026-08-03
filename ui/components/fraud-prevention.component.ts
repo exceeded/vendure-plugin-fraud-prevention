@@ -531,6 +531,44 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     </div>
                 </div>
             </vdr-page-block>
+
+            <vdr-page-block>
+                <div class="card">
+                    <div class="card-block">
+                        <h3 class="step-title">Custom feeds <small>your own threat-list URLs</small></h3>
+                        <p class="hint">Add any public line-based blocklist (one entry per line; <code class="mono">#</code> comments ignored). Synced nightly with the built-ins and matched exactly like them — CIDR ranges included. <span *ngIf="meta && !meta.licensed" class="warn-inline">Custom feeds require a licence.</span></p>
+                        <div class="picker">
+                            <input class="form-input" style="min-width:150px" placeholder="Name (e.g. IPsum)" [(ngModel)]="newFeed.name">
+                            <input class="form-input" style="flex:1;min-width:220px" placeholder="https://…/list.txt" [(ngModel)]="newFeed.url">
+                            <select class="form-select" style="min-width:130px" [(ngModel)]="newFeed.listType">
+                                <option value="ip">IP</option>
+                                <option value="ip_range">IP range (CIDR)</option>
+                                <option value="email_domain">email domain</option>
+                                <option value="email">email</option>
+                            </select>
+                            <button class="gbtn gbtn-outline gbtn-sm" (click)="addFeed()" [disabled]="!newFeed.name || !newFeed.url || (meta && !meta.licensed)">+ Add feed</button>
+                        </div>
+                        <table class="table" *ngIf="customFeeds.length">
+                            <thead><tr><th>Feed</th><th>Type</th><th class="num-col">Entries</th><th>Last synced</th><th>On</th><th></th></tr></thead>
+                            <tbody>
+                                <tr *ngFor="let f of customFeeds">
+                                    <td><strong>{{ f.name }}</strong><div class="hint mono">{{ f.url }}</div>
+                                        <div class="hint" style="color:var(--gb-danger-ink)" *ngIf="f.lastError">⚠ {{ f.lastError }}</div></td>
+                                    <td>{{ f.listType }}</td>
+                                    <td class="num-col">{{ f.lastCount != null ? f.lastCount : '—' }}</td>
+                                    <td class="hint">{{ f.lastSyncedAt ? (f.lastSyncedAt | date: 'd MMM HH:mm') : 'never' }}</td>
+                                    <td><label class="check-label"><input type="checkbox" [checked]="!!f.enabled" (change)="toggleFeed(f)"></label></td>
+                                    <td class="num-col case-actions">
+                                        <button class="gbtn gbtn-outline gbtn-sm" (click)="syncFeed(f)" [disabled]="syncBusy || (meta && !meta.licensed)">Sync</button>
+                                        <button class="chip-x" (click)="removeFeed(f)" [attr.aria-label]="'Remove ' + f.name">×</button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <p class="hint" *ngIf="!customFeeds.length">No custom feeds yet. Popular options: IPsum, blocklist.de, FireHOL Level 2–4, Emerging Threats.</p>
+                    </div>
+                </div>
+            </vdr-page-block>
         </ng-container>
 
         <!-- ============================================================ SIMULATE -->
@@ -1195,6 +1233,8 @@ export class FraudPreventionComponent implements OnInit {
     bl: any[] = [];
     listStatus: any = null;
     sources: any[] = [];
+    customFeeds: any[] = [];
+    newFeed = { name: '', url: '', listType: 'ip' };
     newWl = { type: 'email', value: '', note: '' };
     newBl = { type: 'email', value: '', note: '' };
     syncBusy = false;
@@ -1451,6 +1491,7 @@ export class FraudPreventionComponent implements OnInit {
         this.http.get<any[]>('/fraud-prevention/lists/blocklist').subscribe({ next: r => { this.bl = r; this.cdr.markForCheck(); }, error: () => undefined });
         this.http.get<any>('/fraud-prevention/lists/status').subscribe({ next: r => { this.listStatus = r; this.cdr.markForCheck(); }, error: () => undefined });
         this.http.get<any[]>('/fraud-prevention/lists/sources').subscribe({ next: r => { this.sources = r; this.cdr.markForCheck(); }, error: () => undefined });
+        this.http.get<any[]>('/fraud-prevention/feeds/custom').subscribe({ next: r => { this.customFeeds = r; this.cdr.markForCheck(); }, error: () => undefined });
     }
 
     addEntry(list: 'whitelist' | 'blocklist') {
@@ -1480,6 +1521,45 @@ export class FraudPreventionComponent implements OnInit {
     feedUpdated(key: string): string | null {
         const rows = (this.listStatus?.lists || []).filter((r: any) => r.source === key);
         return rows.length ? rows[0].lastUpdated : null;
+    }
+
+    addFeed() {
+        if (!this.newFeed.name || !this.newFeed.url) return;
+        this.http.post<any>('/fraud-prevention/feeds/custom', this.newFeed).subscribe({
+            next: r => {
+                if (r.ok) {
+                    this.newFeed = { name: '', url: '', listType: 'ip' };
+                    this.notification.success('Feed added — syncing…');
+                    this.loadLists();
+                    if (r.id) this.http.post(`/fraud-prevention/feeds/custom/${r.id}`, { sync: true }).subscribe({ next: () => this.loadLists(), error: () => undefined });
+                } else {
+                    this.notification.error(r.message || 'Could not add feed');
+                }
+            },
+            error: err => this.notification.error(err?.error?.message || 'Could not add feed'),
+        });
+    }
+
+    toggleFeed(f: any) {
+        this.http.post(`/fraud-prevention/feeds/custom/${f.id}`, { enabled: !f.enabled }).subscribe({
+            next: () => { f.enabled = f.enabled ? 0 : 1; },
+            error: () => this.notification.error('Failed'),
+        });
+    }
+
+    syncFeed(f: any) {
+        this.syncBusy = true;
+        this.http.post<any>(`/fraud-prevention/feeds/custom/${f.id}`, { sync: true }).subscribe({
+            next: r => { this.syncBusy = false; r.success ? this.notification.success(r.message) : this.notification.error(r.message); this.loadLists(); },
+            error: err => { this.syncBusy = false; this.notification.error(err?.error?.message || 'Sync failed'); },
+        });
+    }
+
+    removeFeed(f: any) {
+        this.http.delete(`/fraud-prevention/feeds/custom/${f.id}`).subscribe({
+            next: () => { this.customFeeds = this.customFeeds.filter(x => x.id !== f.id); this.notification.success('Feed removed'); this.cdr.markForCheck(); },
+            error: () => this.notification.error('Failed'),
+        });
     }
 
     syncOne(key: string) {

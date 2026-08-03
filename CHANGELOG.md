@@ -5,6 +5,22 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-08-03
+
+### Added
+- **Custom threat feeds.** Add your own public blocklist URLs in the
+  Lists tab — any line-based list (one entry per line, `#` comments
+  ignored), typed as IP / CIDR range / email / email-domain. They sync
+  nightly alongside the built-ins and are matched identically (CIDR
+  included), with per-feed enable/disable, on-demand sync, and last
+  sync count / error surfaced. Licensed feature.
+- Endpoints: `GET/POST /fraud-prevention/feeds/custom`,
+  `POST /feeds/custom/:id` (edit / `{sync:true}`), `DELETE /feeds/custom/:id`.
+
+### Security
+- Feed fetches reject non-http(s) schemes and internal/private targets
+  (localhost, RFC-1918, link-local) as a basic SSRF guard, and cap the
+  response at 30 MB.
 ## [0.4.3] — 2026-08-02
 
 ### Fixed
