@@ -69,6 +69,18 @@ export function renderTemplate(tpl: string, vars: Record<string, string | number
 }
 
 /** Plain text -> simple paragraph HTML (blank-line separated). */
+/** True when the body already contains block/inline HTML we should keep. */
+export function looksLikeHtml(s: string): boolean {
+    return /<\s*(p|div|a|h[1-6]|ul|ol|li|br|table|span|strong|em|b|i|img)\b/i.test(s || '');
+}
+
+/** Render a message body: pass HTML through untouched, wrap plain text into
+ *  paragraphs. Lets the same field hold the plain-text defaults OR a styled
+ *  HTML email built in the visual editor. */
+export function renderBody(text: string): string {
+    return looksLikeHtml(text) ? text : textToHtml(text);
+}
+
 export function textToHtml(text: string): string {
     const esc = (s: string) => s
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

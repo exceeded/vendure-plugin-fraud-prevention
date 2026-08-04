@@ -104,3 +104,20 @@ describe('textToHtml', () => {
         expect((html.match(/<p /g) || []).length).toBe(2);
     });
 });
+
+import { renderBody, looksLikeHtml } from './templates';
+
+describe('renderBody (HTML-aware)', () => {
+    it('wraps plain text into paragraphs', () => {
+        const out = renderBody('line one\n\nline two');
+        expect((out.match(/<p /g) || []).length).toBe(2);
+    });
+    it('passes HTML through untouched', () => {
+        const html = '<p style="color:red">Hi <a href="{{reviewUrl}}">link</a></p>';
+        expect(renderBody(html)).toBe(html);
+    });
+    it('looksLikeHtml detects tags', () => {
+        expect(looksLikeHtml('<div>x</div>')).toBe(true);
+        expect(looksLikeHtml('just text')).toBe(false);
+    });
+});

@@ -17,7 +17,7 @@ import {
 import { BUILTIN_DISPOSABLE_DOMAINS, FRAUD_SOURCES } from './fraud-sources';
 import { ipInCidr, normalizeEmail } from './net-util';
 import { domainHasMx, lookupIpIntel, looksGibberish, IpIntel } from './ip-intel';
-import { DEFAULT_TEMPLATES, MessageKind, renderTemplate, textToHtml } from './templates';
+import { DEFAULT_TEMPLATES, MessageKind, renderTemplate, renderBody } from './templates';
 import { fanOutOpsEvent, OpsEvent } from './ops-notify';
 
 const loggerCtx = 'FraudPrevention';
@@ -1108,7 +1108,7 @@ export class FraudPreventionService implements OnModuleInit {
             reviewHours: cfg.reviewHours ?? 24,
         };
         const subject = renderTemplate(templates[kind].subject, allVars);
-        const bodyHtml = textToHtml(renderTemplate(templates[kind].body, allVars));
+        const bodyHtml = renderBody(renderTemplate(templates[kind].body, allVars));
         await this.sendCustomerNotice(to, subject, bodyHtml);
     }
 

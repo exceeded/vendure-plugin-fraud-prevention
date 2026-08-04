@@ -219,7 +219,7 @@ export class FraudPreventionController {
     @Post('templates/preview')
     async previewTemplate(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: { subject: string; body: string; channelId?: number }) {
         if (denyUnlessAdmin(ctx, res, false)) return;
-        const { renderTemplate, textToHtml } = await import('./templates');
+        const { renderTemplate, renderBody } = await import('./templates');
         const notif = await this.service.getNotificationConfig();
         const cfg = await this.service.getConfig(Number(body.channelId || 1));
         const vars = {
@@ -229,7 +229,7 @@ export class FraudPreventionController {
         };
         return res.json({
             subject: renderTemplate(body.subject || '', vars),
-            html: textToHtml(renderTemplate(body.body || '', vars)),
+            html: renderBody(renderTemplate(body.body || '', vars)),
         });
     }
 

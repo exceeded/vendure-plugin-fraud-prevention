@@ -1,4 +1,4 @@
-import { Component, OnInit, ChangeDetectorRef } from '@angular/core';
+import { Component, OnInit, ChangeDetectorRef, ViewChild, ElementRef } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { NotificationService } from '@vendure/admin-ui/core';
 
@@ -791,11 +791,11 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                 <div class="card">
                     <div class="card-block">
                         <h3 class="step-title">Customer messages <small>({{ current.channelCode }})</small></h3>
-                        <p class="hint">What gated customers hear, in your voice. Plain text — blank lines become paragraphs. Variables: <code class="mono">{{ '{' }}{{ '{' }}orderCode{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}firstName{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}supportEmail{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}reviewHours{{ '}' }}{{ '}' }}</code></p>
+                        <p class="hint">What gated customers hear, in your voice. Build it visually, drag in variables, or switch to HTML. Variables: <code class="mono">{{ '{' }}{{ '{' }}orderCode{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}firstName{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}supportEmail{{ '}' }}{{ '}' }}</code> <code class="mono">{{ '{' }}{{ '{' }}reviewHours{{ '}' }}{{ '}' }}</code></p>
                         <div class="tpl-list" *ngIf="templates">
                             <div class="tpl-list-row" *ngFor="let k of templateKinds">
                                 <input type="checkbox" [(ngModel)]="tplSelected[k.key]" [attr.aria-label]="'Select ' + k.label + ' template'">
-                                <button class="tpl-pick" [class.active]="tplKind === k.key" (click)="tplKind = k.key">
+                                <button class="tpl-pick" [class.active]="tplKind === k.key" (click)="selectKind(k.key)">
                                     <span>{{ k.label }}</span>
                                     <span class="mini-chip" *ngIf="templates[k.key]?.isDefault">default</span>
                                     <span class="mini-chip custom" *ngIf="!templates[k.key]?.isDefault">customised</span>
@@ -809,13 +809,32 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                         <div *ngIf="templates && templates[tplKind]">
                             <div class="form-row">
                                 <label>Subject <span class="mini-chip" *ngIf="templates[tplKind].isDefault">default</span></label>
-                                <input class="form-input" [(ngModel)]="templates[tplKind].subject" (ngModelChange)="tplDirty = true">
+                                <input class="form-input" [(ngModel)]="templates[tplKind].subject" (ngModelChange)="tplDirty = true" (focus)="lastFocus='subject'" #subjectInput>
                             </div>
-                            <div class="form-row">
-                                <label>Body</label>
-                                <textarea class="form-input" rows="10" style="max-width:100%;font-family:inherit" [(ngModel)]="templates[tplKind].body" (ngModelChange)="tplDirty = true"></textarea>
+                            <div class="rte">
+                                <div class="rte-head">
+                                    <div class="rte-toolbar" *ngIf="!htmlMode">
+                                        <button type="button" class="rte-btn" title="Bold" (click)="exec('bold')"><b>B</b></button>
+                                        <button type="button" class="rte-btn" title="Italic" (click)="exec('italic')"><i>i</i></button>
+                                        <button type="button" class="rte-btn" title="Heading" (click)="exec('formatBlock','<h2>')">H</button>
+                                        <button type="button" class="rte-btn" title="Bulleted list" (click)="exec('insertUnorderedList')">&#8226;</button>
+                                        <button type="button" class="rte-btn" title="Link" (click)="addLink()">&#128279;</button>
+                                        <button type="button" class="rte-btn" title="Centre" (click)="exec('justifyCenter')">&#8801;</button>
+                                        <button type="button" class="rte-btn" title="Left" (click)="exec('justifyLeft')">&#8676;</button>
+                                    </div>
+                                    <div class="rte-viewtoggle">
+                                        <button type="button" class="rte-tab" [class.active]="!htmlMode" (click)="setHtmlMode(false)">Visual</button>
+                                        <button type="button" class="rte-tab" [class.active]="htmlMode" (click)="setHtmlMode(true)">HTML</button>
+                                    </div>
+                                </div>
+                                <div class="rte-vars">
+                                    <span class="rte-varlabel">Drag or click to insert:</span>
+                                    <span class="rte-chip" *ngFor="let v of emailVars" draggable="true" (dragstart)="onVarDrag($event, v.token)" (click)="insertVar(v.token)" [title]="v.token">{{ v.label }}</span>
+                                </div>
+                                <div class="rte-editor" *ngIf="!htmlMode" #emailEditor contenteditable="true" (input)="onEditorInput()" (blur)="onEditorInput()" (dragover)="$event.preventDefault()" (drop)="onEditorDrop($event)"></div>
+                                <textarea class="rte-source" *ngIf="htmlMode" [(ngModel)]="templates[tplKind].body" (ngModelChange)="tplDirty = true" rows="12" spellcheck="false"></textarea>
                             </div>
-                            <div class="picker">
+                            <div class="picker" style="margin-top:12px">
                                 <button class="gbtn gbtn-primary gbtn-sm" (click)="saveTemplate()" [disabled]="!tplDirty">Save message</button>
                                 <button class="gbtn gbtn-outline gbtn-sm" (click)="previewTemplate()">Preview</button>
                                 <button class="gbtn gbtn-ghost gbtn-sm" (click)="resetTemplate()" [disabled]="templates[tplKind].isDefault">Reset to default</button>
@@ -1114,6 +1133,22 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
             letter-spacing: 0.06em; text-transform: uppercase; color: var(--gb-muted);
         }
         .subsection-title:first-of-type { margin-top: 4px; }
+        .rte { border:1px solid var(--gb-line); border-radius:10px; overflow:hidden; margin-bottom:4px; }
+        .rte-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 8px; background:var(--gb-surface-2); border-bottom:1px solid var(--gb-line); flex-wrap:wrap; }
+        .rte-toolbar { display:flex; gap:2px; flex-wrap:wrap; }
+        .rte-btn { min-width:30px; height:30px; padding:0 8px; border:1px solid transparent; background:none; border-radius:6px; cursor:pointer; color:var(--gb-strong); font-size:14px; }
+        .rte-btn:hover { background:var(--gb-surface); border-color:var(--gb-line); }
+        .rte-viewtoggle { display:inline-flex; border:1px solid var(--gb-ui-border); border-radius:999px; overflow:hidden; }
+        .rte-tab { padding:4px 12px; border:0; background:none; cursor:pointer; font-size:11px; font-weight:700; color:var(--gb-muted); }
+        .rte-tab.active { background:var(--gb-amber); color:var(--gb-amber-ink); }
+        .rte-vars { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:8px 10px; border-bottom:1px solid var(--gb-line-soft); background:var(--gb-surface); }
+        .rte-varlabel { font-size:11px; font-weight:700; color:var(--gb-muted); text-transform:uppercase; letter-spacing:.05em; }
+        .rte-chip { font-size:12px; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--gb-tint-info); border:1px solid var(--gb-line-info); color:var(--gb-strong); cursor:grab; user-select:none; }
+        .rte-chip:hover { border-color:var(--gb-amber-edge); }
+        .rte-editor { min-height:220px; max-height:520px; overflow:auto; padding:16px 18px; background:#fff; color:#0f172a; font-family:Arial,Helvetica,sans-serif; font-size:14px; line-height:1.6; outline:none; }
+        .rte-editor:focus { box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--gb-amber) 30%,transparent); }
+        .rte-editor h2 { font-size:18px; margin:0 0 8px; } .rte-editor a { color:#2a78d6; }
+        .rte-source { width:100%; border:0; padding:14px 16px; background:var(--gb-surface); color:var(--gb-strong); font-family:ui-monospace,monospace; font-size:12px; line-height:1.5; outline:none; resize:vertical; }
         .tpl-preview {
             margin-top: 14px; padding: 16px 18px; border-radius: 10px;
             border: 1px dashed var(--gb-ui-border); background: var(--gb-surface-2);
@@ -1281,6 +1316,16 @@ export class FraudPreventionComponent implements OnInit {
         { key: 'rejected' as const, label: 'Rejected' },
     ];
     tplKind: 'held' | 'approved' | 'rejected' = 'held';
+    htmlMode = false;
+    lastFocus: 'body' | 'subject' = 'body';
+    @ViewChild('emailEditor') emailEditorRef?: ElementRef<HTMLElement>;
+    @ViewChild('subjectInput') subjectInputRef?: ElementRef<HTMLInputElement>;
+    emailVars = [
+        { token: '{{firstName}}', label: 'First name' },
+        { token: '{{orderCode}}', label: 'Order code' },
+        { token: '{{supportEmail}}', label: 'Support email' },
+        { token: '{{reviewHours}}', label: 'Review hours' },
+    ];
     tplDirty = false;
     tplPreview: any = null;
     tplSelected: Record<string, boolean> = {};
@@ -1702,10 +1747,46 @@ export class FraudPreventionComponent implements OnInit {
         if (!this.current) return;
         this.tplPreview = null;
         this.tplDirty = false;
+        this.htmlMode = false;
         this.http.get<any>(`/fraud-prevention/templates?channelId=${this.current.channelId}`).subscribe({
-            next: t => { this.templates = t; this.cdr.markForCheck(); },
+            next: t => { this.templates = t; this.cdr.markForCheck(); setTimeout(() => this.syncEditorFromModel(), 0); },
             error: () => undefined,
         });
+    }
+
+    // ── Rich email editor ───────────────────────────────────────────
+    selectKind(kind: 'held' | 'approved' | 'rejected') { this.tplKind = kind; setTimeout(() => this.syncEditorFromModel(), 0); }
+    private editorEl(): HTMLElement | null { return this.emailEditorRef?.nativeElement || null; }
+    private syncEditorFromModel() { const ed = this.editorEl(); if (ed && this.templates?.[this.tplKind]) ed.innerHTML = this.templates[this.tplKind].body || ''; }
+    onEditorInput() { const ed = this.editorEl(); if (ed && this.templates?.[this.tplKind]) { this.templates[this.tplKind].body = ed.innerHTML; this.tplDirty = true; } }
+    setHtmlMode(on: boolean) {
+        if (on === this.htmlMode) return;
+        if (!on) { this.htmlMode = false; setTimeout(() => this.syncEditorFromModel(), 0); }
+        else { this.onEditorInput(); this.htmlMode = true; }
+    }
+    exec(cmd: string, val?: string) { const ed = this.editorEl(); if (!ed) return; ed.focus(); try { document.execCommand(cmd, false, val); } catch {} this.onEditorInput(); }
+    addLink() { const url = prompt('Link URL', 'https://'); if (url) this.exec('createLink', url); }
+    onVarDrag(ev: DragEvent, token: string) { ev.dataTransfer?.setData('text/plain', token); }
+    onEditorDrop(ev: DragEvent) {
+        ev.preventDefault();
+        const token = ev.dataTransfer?.getData('text/plain') || ''; if (!token) return;
+        const ed = this.editorEl(); if (!ed) return;
+        const doc: any = document; let range: Range | null = null;
+        if (doc.caretRangeFromPoint) range = doc.caretRangeFromPoint(ev.clientX, ev.clientY);
+        else if (doc.caretPositionFromPoint) { const p = doc.caretPositionFromPoint(ev.clientX, ev.clientY); if (p) { range = document.createRange(); range.setStart(p.offsetNode, p.offset); range.collapse(true); } }
+        if (range) { const sel = window.getSelection(); sel?.removeAllRanges(); sel?.addRange(range); }
+        ed.focus(); try { document.execCommand('insertText', false, token); } catch {} this.onEditorInput();
+    }
+    insertVar(token: string) {
+        if (this.lastFocus === 'subject' && this.subjectInputRef && this.templates?.[this.tplKind]) {
+            const el = this.subjectInputRef.nativeElement; const start = el.selectionStart ?? el.value.length; const end = el.selectionEnd ?? start;
+            this.templates[this.tplKind].subject = el.value.slice(0, start) + token + el.value.slice(end); this.tplDirty = true;
+            setTimeout(() => { el.focus(); const pos = start + token.length; el.setSelectionRange(pos, pos); }, 0);
+            return;
+        }
+        if (this.htmlMode && this.templates?.[this.tplKind]) { this.templates[this.tplKind].body = (this.templates[this.tplKind].body || '') + token; this.tplDirty = true; return; }
+        const ed = this.editorEl(); if (!ed) return; ed.focus();
+        try { document.execCommand('insertText', false, token); } catch {} this.onEditorInput();
     }
 
     saveTemplate() {

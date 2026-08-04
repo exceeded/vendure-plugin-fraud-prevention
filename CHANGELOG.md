@@ -5,6 +5,15 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-08-04
+
+### Added
+- **Visual email editor** for the customer messages (held / approved /
+  rejected): formatting toolbar, drag-and-drop variable chips, and a
+  Visual / HTML toggle. Message bodies are now HTML-aware — the
+  plain-text defaults still render as before, but you can build a fully
+  styled HTML email and it passes through untouched.
+
 ## [0.5.0] — 2026-08-03
 
 ### Added
