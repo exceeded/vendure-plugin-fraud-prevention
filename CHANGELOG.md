@@ -5,6 +5,14 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] — 2026-08-04
+
+### Fixed
+- Dark mode: the customer-message editor canvas now reads as intentional
+  white paper (framed, visible caret), and the message preview renders on
+  white — it was showing on a dark surface, which misrepresented the
+  email and clashed with its inline colours.
+
 ## [0.6.0] — 2026-08-04
 
 ### Added
