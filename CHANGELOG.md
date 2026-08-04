@@ -5,6 +5,18 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-08-04
+
+### Added
+- **Full editor toolbar** for the customer messages: text + highlight
+  colour, font size, underline/strikethrough, headings/quotes, numbered
+  lists, indent/outdent, image insert, custom button, divider, alignment,
+  clear-formatting and undo/redo.
+
+### Fixed
+- Editor text showed grey in dark mode (admin theme colouring bare block
+  elements). Canvas content now forces dark ink on the white paper.
+
 ## [0.6.1] — 2026-08-04
 
 ### Fixed

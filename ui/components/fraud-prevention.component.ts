@@ -816,11 +816,36 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                     <div class="rte-toolbar" *ngIf="!htmlMode">
                                         <button type="button" class="rte-btn" title="Bold" (click)="exec('bold')"><b>B</b></button>
                                         <button type="button" class="rte-btn" title="Italic" (click)="exec('italic')"><i>i</i></button>
-                                        <button type="button" class="rte-btn" title="Heading" (click)="exec('formatBlock','<h2>')">H</button>
+                                        <button type="button" class="rte-btn" title="Underline" (click)="exec('underline')"><u>U</u></button>
+                                        <button type="button" class="rte-btn" title="Strikethrough" (click)="exec('strikeThrough')"><s>S</s></button>
+                                        <span class="rte-sep"></span>
+                                        <select class="rte-select" title="Text style" (change)="setBlock($any($event.target).value); $any($event.target).selectedIndex=0">
+                                            <option value="">Style</option><option value="p">Normal</option><option value="h2">Heading</option><option value="h3">Subheading</option><option value="blockquote">Quote</option>
+                                        </select>
+                                        <select class="rte-select" title="Text size" (change)="exec('fontSize', $any($event.target).value); $any($event.target).selectedIndex=0">
+                                            <option value="">Size</option><option value="1">XS</option><option value="2">S</option><option value="3">M</option><option value="4">L</option><option value="5">XL</option><option value="6">XXL</option>
+                                        </select>
+                                        <span class="rte-sep"></span>
+                                        <label class="rte-btn rte-color" title="Text colour"><span style="text-decoration:underline;text-decoration-color:#e11d48">A</span><input type="color" (change)="exec('foreColor', $any($event.target).value)"></label>
+                                        <label class="rte-btn rte-color" title="Highlight"><span style="background:#fde68a;padding:0 2px;color:#111">H</span><input type="color" value="#ffff00" (change)="exec('hiliteColor', $any($event.target).value)"></label>
+                                        <span class="rte-sep"></span>
                                         <button type="button" class="rte-btn" title="Bulleted list" (click)="exec('insertUnorderedList')">&#8226;</button>
+                                        <button type="button" class="rte-btn" title="Numbered list" (click)="exec('insertOrderedList')">1.</button>
+                                        <button type="button" class="rte-btn" title="Indent" (click)="exec('indent')">&#8677;|</button>
+                                        <button type="button" class="rte-btn" title="Outdent" (click)="exec('outdent')">|&#8676;</button>
+                                        <span class="rte-sep"></span>
                                         <button type="button" class="rte-btn" title="Link" (click)="addLink()">&#128279;</button>
-                                        <button type="button" class="rte-btn" title="Centre" (click)="exec('justifyCenter')">&#8801;</button>
-                                        <button type="button" class="rte-btn" title="Left" (click)="exec('justifyLeft')">&#8676;</button>
+                                        <button type="button" class="rte-btn" title="Insert image" (click)="insertImage()">&#128247;</button>
+                                        <button type="button" class="rte-btn" title="Insert button" (click)="insertButton()">Btn</button>
+                                        <button type="button" class="rte-btn" title="Divider" (click)="exec('insertHorizontalRule')">&#8213;</button>
+                                        <span class="rte-sep"></span>
+                                        <button type="button" class="rte-btn" title="Align left" (click)="exec('justifyLeft')">&#8676;</button>
+                                        <button type="button" class="rte-btn" title="Centre" (click)="exec('justifyCenter')">&#8803;</button>
+                                        <button type="button" class="rte-btn" title="Align right" (click)="exec('justifyRight')">&#8677;</button>
+                                        <span class="rte-sep"></span>
+                                        <button type="button" class="rte-btn" title="Clear formatting" (click)="exec('removeFormat')">T&#215;</button>
+                                        <button type="button" class="rte-btn" title="Undo" (click)="exec('undo')">&#8630;</button>
+                                        <button type="button" class="rte-btn" title="Redo" (click)="exec('redo')">&#8631;</button>
                                     </div>
                                     <div class="rte-viewtoggle">
                                         <button type="button" class="rte-tab" [class.active]="!htmlMode" (click)="setHtmlMode(false)">Visual</button>
@@ -1149,6 +1174,13 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
         :host-context([data-theme='dark']) .rte-editor { box-shadow:0 2px 14px rgba(0,0,0,.5); }
         .rte-editor ::selection { background:#b3d4fc; color:#0f172a; }
         .rte-editor:focus { box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--gb-amber) 30%,transparent); }
+        .rte-editor p, .rte-editor li, .rte-editor h1, .rte-editor h2, .rte-editor h3, .rte-editor h4, .rte-editor div, .rte-editor span, .rte-editor strong, .rte-editor em, .rte-editor td, .rte-editor th, .rte-editor blockquote, .rte-editor ul, .rte-editor ol { color: inherit; }
+        .rte-editor img { max-width:100%; height:auto; }
+        .rte-editor blockquote { border-left:3px solid #cbd5e1; margin:0 0 12px; padding:2px 0 2px 14px; color:#475569; }
+        .rte-sep { display:inline-block; width:1px; height:20px; background:var(--gb-line); margin:0 3px; vertical-align:middle; }
+        .rte-select { height:30px; border:1px solid var(--gb-line); border-radius:6px; background:var(--gb-surface); color:var(--gb-strong); font-size:12px; padding:0 4px; cursor:pointer; }
+        .rte-color { position:relative; overflow:hidden; display:inline-grid; place-items:center; }
+        .rte-color input[type=color] { position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer; border:0; padding:0; }
         .rte-editor h2 { font-size:18px; margin:0 0 8px; } .rte-editor a { color:#2a78d6; }
         .rte-source { width:100%; border:0; padding:14px 16px; background:var(--gb-surface); color:var(--gb-strong); font-family:ui-monospace,monospace; font-size:12px; line-height:1.5; outline:none; resize:vertical; }
         .tpl-preview {
@@ -1767,7 +1799,22 @@ export class FraudPreventionComponent implements OnInit {
         else { this.onEditorInput(); this.htmlMode = true; }
     }
     exec(cmd: string, val?: string) { const ed = this.editorEl(); if (!ed) return; ed.focus(); try { document.execCommand(cmd, false, val); } catch {} this.onEditorInput(); }
+    setBlock(tag: string) { if (tag) this.exec('formatBlock', '<' + tag + '>'); }
     addLink() { const url = prompt('Link URL', 'https://'); if (url) this.exec('createLink', url); }
+    insertImage() {
+        const ed = this.editorEl(); if (!ed) return; ed.focus();
+        const url = prompt('Image URL (https://…)', 'https://'); if (!url) return;
+        const alt = prompt('Alt text (for accessibility)', '') || '';
+        try { document.execCommand('insertHTML', false, `<img src="${url}" alt="${alt.replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:6px">`); } catch {}
+        this.onEditorInput();
+    }
+    insertButton() {
+        const ed = this.editorEl(); if (!ed) return; ed.focus();
+        const label = prompt('Button text', 'Contact us'); if (label === null) return;
+        const url = prompt('Button link', 'https://'); if (url === null) return;
+        try { document.execCommand('insertHTML', false, `<p style="text-align:center;margin:18px 0"><a href="${url}" style="display:inline-block;background:#0f172a;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 24px;border-radius:8px">${label.replace(/</g, '&lt;')}</a></p>`); } catch {}
+        this.onEditorInput();
+    }
     onVarDrag(ev: DragEvent, token: string) { ev.dataTransfer?.setData('text/plain', token); }
     onEditorDrop(ev: DragEvent) {
         ev.preventDefault();
