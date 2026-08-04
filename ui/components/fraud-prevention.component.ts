@@ -1,6 +1,6 @@
 import { Component, OnInit, ChangeDetectorRef, ViewChild, ElementRef } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { NotificationService } from '@vendure/admin-ui/core';
+import { NotificationService, ModalService, AssetPickerDialogComponent } from '@vendure/admin-ui/core';
 
 interface FraudConfig {
     channelId: number;
@@ -835,7 +835,8 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                         <button type="button" class="rte-btn" title="Outdent" (click)="exec('outdent')">|&#8676;</button>
                                         <span class="rte-sep"></span>
                                         <button type="button" class="rte-btn" title="Link" (click)="addLink()">&#128279;</button>
-                                        <button type="button" class="rte-btn" title="Insert image" (click)="insertImage()">&#128247;</button>
+                                        <button type="button" class="rte-btn" title="Insert image by URL" (click)="insertImage()">&#128247;</button>
+                                        <button type="button" class="rte-btn" title="Upload / choose from asset library" (click)="pickAsset()">&#128193;</button>
                                         <button type="button" class="rte-btn" title="Insert button" (click)="insertButton()">Btn</button>
                                         <button type="button" class="rte-btn" title="Divider" (click)="exec('insertHorizontalRule')">&#8213;</button>
                                         <span class="rte-sep"></span>
@@ -856,7 +857,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                     <span class="rte-varlabel">Drag or click to insert:</span>
                                     <span class="rte-chip" *ngFor="let v of emailVars" draggable="true" (dragstart)="onVarDrag($event, v.token)" (click)="insertVar(v.token)" [title]="v.token">{{ v.label }}</span>
                                 </div>
-                                <div class="rte-editor" *ngIf="!htmlMode" #emailEditor contenteditable="true" (input)="onEditorInput()" (blur)="onEditorInput()" (dragover)="$event.preventDefault()" (drop)="onEditorDrop($event)"></div>
+                                <div class="rte-editor" *ngIf="!htmlMode" #emailEditor contenteditable="true" (input)="onEditorInput()" (blur)="onEditorInput()" (keyup)="saveRange()" (mouseup)="saveRange()" (dragover)="$event.preventDefault()" (drop)="onEditorDrop($event)"></div>
                                 <textarea class="rte-source" *ngIf="htmlMode" [(ngModel)]="templates[tplKind].body" (ngModelChange)="tplDirty = true" rows="12" spellcheck="false"></textarea>
                             </div>
                             <div class="picker" style="margin-top:12px">
@@ -1369,6 +1370,7 @@ export class FraudPreventionComponent implements OnInit {
         private http: HttpClient,
         private notification: NotificationService,
         private cdr: ChangeDetectorRef,
+        private modalService: ModalService,
     ) {}
 
     get current(): FraudConfig | null {
@@ -1798,20 +1800,36 @@ export class FraudPreventionComponent implements OnInit {
         if (!on) { this.htmlMode = false; setTimeout(() => this.syncEditorFromModel(), 0); }
         else { this.onEditorInput(); this.htmlMode = true; }
     }
-    exec(cmd: string, val?: string) { const ed = this.editorEl(); if (!ed) return; ed.focus(); try { document.execCommand(cmd, false, val); } catch {} this.onEditorInput(); }
+    private savedRange: Range | null = null;
+    saveRange() { const sel = window.getSelection(); const ed = this.editorEl(); if (sel && sel.rangeCount && ed && ed.contains(sel.anchorNode)) this.savedRange = sel.getRangeAt(0).cloneRange(); }
+    private restoreRange() { const ed = this.editorEl(); if (!ed) return; ed.focus(); if (this.savedRange && ed.contains(this.savedRange.commonAncestorContainer)) { const sel = window.getSelection(); sel?.removeAllRanges(); sel?.addRange(this.savedRange); } }
+    exec(cmd: string, val?: string) { const ed = this.editorEl(); if (!ed) return; this.restoreRange(); try { document.execCommand(cmd, false, val); } catch {} this.saveRange(); this.onEditorInput(); }
+    pickAsset() {
+        const ed = this.editorEl(); if (!ed) return;
+        this.modalService.fromComponent(AssetPickerDialogComponent as any, { size: 'xl' }).subscribe((result: any) => {
+            if (result && result.length) {
+                const imgs = result.map((a: any) => `<img src="${a.preview || a.source}" alt="${String(a.name || '').replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:6px">`).join('');
+                this.restoreRange();
+                try { document.execCommand('insertHTML', false, imgs); } catch {}
+                this.onEditorInput();
+            }
+        });
+    }
     setBlock(tag: string) { if (tag) this.exec('formatBlock', '<' + tag + '>'); }
     addLink() { const url = prompt('Link URL', 'https://'); if (url) this.exec('createLink', url); }
     insertImage() {
-        const ed = this.editorEl(); if (!ed) return; ed.focus();
+        const ed = this.editorEl(); if (!ed) return;
         const url = prompt('Image URL (https://…)', 'https://'); if (!url) return;
         const alt = prompt('Alt text (for accessibility)', '') || '';
+        this.restoreRange();
         try { document.execCommand('insertHTML', false, `<img src="${url}" alt="${alt.replace(/"/g, '&quot;')}" style="max-width:100%;height:auto;border-radius:6px">`); } catch {}
         this.onEditorInput();
     }
     insertButton() {
-        const ed = this.editorEl(); if (!ed) return; ed.focus();
+        const ed = this.editorEl(); if (!ed) return;
         const label = prompt('Button text', 'Contact us'); if (label === null) return;
         const url = prompt('Button link', 'https://'); if (url === null) return;
+        this.restoreRange();
         try { document.execCommand('insertHTML', false, `<p style="text-align:center;margin:18px 0"><a href="${url}" style="display:inline-block;background:#0f172a;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 24px;border-radius:8px">${label.replace(/</g, '&lt;')}</a></p>`); } catch {}
         this.onEditorInput();
     }

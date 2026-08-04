@@ -5,6 +5,14 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-08-04
+
+### Added
+- **Upload image / asset library** button in the message editor — opens
+  Vendure's asset picker (browse or upload) and inserts the image, stored
+  in your asset library. Editor selection is saved/restored so toolbar and
+  colour actions apply reliably after a dialog opens.
+
 ## [0.7.0] — 2026-08-04
 
 ### Added
