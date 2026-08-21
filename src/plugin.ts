@@ -72,6 +72,39 @@ export class FraudPreventionPlugin {
         if (FraudPreventionPlugin.licenceStatus?.valid) return true;
         return !!FraudPreventionPlugin.evalClientInternal?.getState()?.active;
     }
+
+    private static licenceHost = '';
+
+    /** Verify + apply a licence key at runtime (admin-UI activation).
+     *  Identical checks to boot-time verification: signature, pluginId,
+     *  domain binding, expiry, revocation list. Only applied when valid. */
+    static activateRuntimeLicence(key: string): LicenceStatus {
+        const status = verifyLicence({
+            licenceKey: key, pluginId: PLUGIN_ID, host: FraudPreventionPlugin.licenceHost,
+            publicKey: HULO_PUBLIC_KEY, revokedIds: FraudPreventionPlugin.revocation?.getRevokedIds(),
+        });
+        if (status.valid) {
+            FraudPreventionPlugin.licenceStatus = status;
+            FraudPreventionPlugin.evalClientInternal?.stop();
+        }
+        return status;
+    }
+
+    /** Drop an admin-activated key at runtime: back to unlicensed state
+     *  (an env/init key, if any, is re-verified by the caller flow) and
+     *  the evaluation clock resumes from wherever the server says it is. */
+    static deactivateRuntimeLicence(): void {
+        FraudPreventionPlugin.licenceStatus = {
+            valid: false,
+            message: 'No licence key configured. The plugin will run in unlicensed (degraded) mode.',
+        } as LicenceStatus;
+        if (FraudPreventionPlugin.evalClientInternal) {
+            FraudPreventionPlugin.evalClientInternal.start();
+        } else {
+            FraudPreventionPlugin.evalClientInternal = new EvaluationClient({ packageName: PKG_NAME, packageVersion: PKG_VERSION });
+            FraudPreventionPlugin.evalClientInternal.start();
+        }
+    }
     static startEvaluation(): void {
         if (!FraudPreventionPlugin.evalClientInternal) {
             FraudPreventionPlugin.evalClientInternal = new EvaluationClient({ packageName: PKG_NAME, packageVersion: PKG_VERSION });
@@ -79,9 +112,21 @@ export class FraudPreventionPlugin {
         }
     }
 
-    constructor(service: FraudPreventionService) {
+    constructor(private service: FraudPreventionService) {
         // Anonymous aggregates for the (opt-in) evaluation reminder emails.
         FraudPreventionPlugin.evalClientInternal?.setStatsProvider(() => service.evalStats());
+    }
+
+    /** Apply an admin-activated licence key persisted in the DB. Runs
+     *  after DI is up; an explicitly configured env/init key wins. */
+    async onApplicationBootstrap() {
+        if (FraudPreventionPlugin.isLicensed()) return;
+        const stored = await this.service.loadStoredLicenceKey();
+        if (stored) {
+            const st = FraudPreventionPlugin.activateRuntimeLicence(stored);
+            // eslint-disable-next-line no-console
+            if (st.valid) console.log(`[${PKG_NAME}] licence restored from admin activation — ${st.message}`);
+        }
     }
 
     private static revocation: RevocationChecker | null = null;
@@ -116,6 +161,7 @@ export class FraudPreventionPlugin {
 
         const host = (options.publicBaseUrl || '')
             .replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        FraudPreventionPlugin.licenceHost = host;
         const status = verifyLicence({
             licenceKey: options.licenceKey,
             pluginId: PLUGIN_ID,

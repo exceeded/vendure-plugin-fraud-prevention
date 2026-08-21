@@ -5,6 +5,16 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-08-21
+
+### Added
+- **In-admin licence activation.** Paste your key into the plugin's
+  admin page and it verifies (signature, plugin id, domain binding,
+  expiry, revocation) and activates instantly — no .env edit, no
+  redeploy. The key persists in the shared hulo_licence_store table and
+  is re-applied on every boot; an explicitly configured env/init key
+  always wins. POST licence/activate + licence/deactivate endpoints.
+
 ## [0.9.1] — 2026-08-21
 
 ### Added

@@ -117,6 +117,13 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-primary gbtn-sm">Get a licence ↗</a>
                 </div>
             </div>
+            <div class="update-banner" style="margin-top:8px">
+                <div><strong>🔑 Already have a licence key?</strong> Paste it from your purchase email to activate instantly — no .env edit, no redeploy.</div>
+                <div class="actions eval-actions">
+                    <input class="eval-email" style="min-width:280px" type="text" placeholder="eyJhbGciOi…" [(ngModel)]="licenceKeyInput" [disabled]="activating">
+                    <button class="gbtn gbtn-primary gbtn-sm" (click)="activateLicence()" [disabled]="activating || !licenceKeyInput">{{ activating ? 'Verifying…' : 'Activate' }}</button>
+                </div>
+            </div>
         </vdr-page-block>
         <vdr-page-block *ngIf="updateAvailable()">
             <div class="update-banner">
@@ -1300,6 +1307,8 @@ export class FraudPreventionComponent implements OnInit {
     remindEmail = '';
     remindMeSending = false;
     remindMeSent = false;
+    licenceKeyInput = '';
+    activating = false;
     configs: FraudConfig[] = [];
     currentIdx = 0;
     dirty = false;
@@ -1416,6 +1425,26 @@ export class FraudPreventionComponent implements OnInit {
         this.http.post<any>('/fraud-prevention/eval/remind-me', { email }).subscribe({
             next: () => { this.remindMeSending = false; this.remindMeSent = true; this.notification.success('Reminder set — check your inbox for a confirmation'); this.cdr.markForCheck(); },
             error: () => { this.remindMeSending = false; this.notification.error('Could not save the reminder — try again shortly'); this.cdr.markForCheck(); },
+        });
+    }
+
+    activateLicence() {
+        const key = (this.licenceKeyInput || '').trim();
+        if (!key) return;
+        this.activating = true;
+        this.http.post<any>('/fraud-prevention/licence/activate', { key }).subscribe({
+            next: (r) => {
+                this.activating = false;
+                this.licenceKeyInput = '';
+                this.notification.success(r?.message || 'Licence activated — all features enabled');
+                this.http.get<any>('/fraud-prevention/meta').subscribe({ next: m => { this.meta = m; this.cdr.markForCheck(); }, error: () => undefined });
+                this.cdr.markForCheck();
+            },
+            error: (e) => {
+                this.activating = false;
+                this.notification.error(e?.error?.message || 'That key did not validate — check it was copied completely');
+                this.cdr.markForCheck();
+            },
         });
     }
 

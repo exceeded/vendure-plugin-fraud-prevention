@@ -1,3 +1,4 @@
+import { LicenceStore } from '@huloglobal/vendure-licence-sdk';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Logger, TransactionalConnection } from '@vendure/core';
 import * as nodemailer from 'nodemailer';
@@ -60,6 +61,22 @@ export class FraudPreventionService implements OnModuleInit {
 
     private get db() {
         return this.connection.rawConnection;
+    }
+
+    private licenceStore = new LicenceStore((sql, params) => this.db.query(sql, params));
+
+    async loadStoredLicenceKey(): Promise<string | null> {
+        await this.licenceStore.ensureTable();
+        return this.licenceStore.load('vendure-plugin-fraud-prevention');
+    }
+
+    async saveStoredLicenceKey(key: string): Promise<void> {
+        await this.licenceStore.ensureTable();
+        await this.licenceStore.save('vendure-plugin-fraud-prevention', key);
+    }
+
+    async clearStoredLicenceKey(): Promise<void> {
+        await this.licenceStore.clear('vendure-plugin-fraud-prevention');
     }
 
     /** Anonymous usage aggregates for the evaluation drip (numbers only). */

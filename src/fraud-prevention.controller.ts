@@ -69,6 +69,29 @@ export class FraudPreventionController {
         });
     }
 
+    /** Admin-UI licence activation: paste the key from the purchase
+     *  email, verified with exactly the boot-time checks, applied
+     *  immediately (no .env edit, no redeploy) and persisted. */
+    @Post('licence/activate')
+    async licenceActivate(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        const key = String(body?.key || '').trim();
+        if (!key) return res.status(400).json({ licensed: false, message: 'Paste your licence key first.' });
+        const status = FraudPreventionPlugin.activateRuntimeLicence(key);
+        if (!status.valid) return res.status(400).json({ licensed: false, message: status.message || 'Invalid licence key.' });
+        await this.service.saveStoredLicenceKey(key);
+        return res.json({ licensed: true, message: status.message });
+    }
+
+    /** Remove an admin-activated key (env-configured keys are unaffected). */
+    @Post('licence/deactivate')
+    async licenceDeactivate(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        await this.service.clearStoredLicenceKey();
+        FraudPreventionPlugin.deactivateRuntimeLicence();
+        return res.json({ licensed: false });
+    }
+
     /** Admin opt-in: "email me before my evaluation ends". Proxied
      *  server-to-server to the HULO licence server, which sends a
      *  welcome email and runs the reminder drip. Explicit consent only. */
