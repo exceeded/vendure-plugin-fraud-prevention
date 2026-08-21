@@ -5,7 +5,7 @@ import { RateLimiter } from '@huloglobal/vendure-licence-sdk';
 
 import { FraudPreventionService } from './fraud-prevention.service';
 import { FraudPreventionPlugin } from './plugin';
-import { FRAUD_SOURCES } from './fraud-sources';
+import { CUSTOM_FEED_PRESETS, FRAUD_SOURCES } from './fraud-sources';
 import { FraudChannelConfig } from './types';
 
 /** Admin surface requires a logged-in admin with catalog permissions —
@@ -321,6 +321,13 @@ export class FraudPreventionController {
     }
 
     // ── Custom feeds (user-defined threat-list URLs) ───────────────────
+    /** Curated well-known feeds for one-click adding in the UI. */
+    @Get('feeds/presets')
+    async feedPresets(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        return res.json(CUSTOM_FEED_PRESETS);
+    }
+
     @Get('feeds/custom')
     async customFeeds(@Ctx() ctx: RequestContext, @Res() res: Response) {
         if (denyUnlessAdmin(ctx, res, false)) return;

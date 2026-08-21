@@ -5,6 +5,21 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-08-21
+
+### Added
+- **One-click threat-feed presets.** The Custom feeds section now offers
+  seven curated, well-known public lists (IPsum L3+, blocklist.de,
+  FireHOL L2/L3, Emerging Threats compromised, CINS Army, StopForumSpam
+  toxic domains) as add-with-one-click presets — no more hunting URLs.
+  All URLs verified live at publish time; already-added feeds are
+  hidden from the preset row.
+
+### Fixed
+- Premium buttons (enforce mode, feed sync, custom feeds) were still
+  disabled during the full-featured evaluation — gating now keys off
+  the tier, so trial installs can use everything the server allows.
+
 ## [0.10.0] — 2026-08-21
 
 ### Added

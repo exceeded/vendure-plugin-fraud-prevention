@@ -50,3 +50,18 @@ export const BUILTIN_DISPOSABLE_DOMAINS = new Set([
     'tempinbox.com', 'spamgourmet.com', 'mailsac.com', 'inboxkitten.com',
     '33mail.com', 'anonaddy.me', 'duck.com.disposable.invalid',
 ]);
+
+/**
+ * Curated, well-known public feeds offered as one-click presets in the
+ * Custom feeds UI (the built-in FRAUD_SOURCES above sync automatically;
+ * these are opt-in extras). Every URL verified live at publish time.
+ */
+export const CUSTOM_FEED_PRESETS: Array<{ key: string; name: string; url: string; listType: 'ip' | 'ip_range' | 'email_domain'; description: string }> = [
+    { key: 'ipsum3', name: 'IPsum (level 3+)', url: 'https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt', listType: 'ip', description: 'IPs seen on 3+ blacklists — good signal/noise balance (~13k)' },
+    { key: 'blocklistDe', name: 'blocklist.de (all)', url: 'https://lists.blocklist.de/lists/all.txt', listType: 'ip', description: 'IPs reported attacking fail2ban users in the last 48h (~23k)' },
+    { key: 'firehol2', name: 'FireHOL Level 2', url: 'https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset', listType: 'ip_range', description: 'Attacks seen in the last 2 days (~16k ranges)' },
+    { key: 'firehol3', name: 'FireHOL Level 3', url: 'https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level3.netset', listType: 'ip_range', description: 'Attacks/malware seen in the last 30 days (~13k ranges)' },
+    { key: 'etCompromised', name: 'Emerging Threats compromised', url: 'https://rules.emergingthreats.net/blockrules/compromised-ips.txt', listType: 'ip', description: 'Known-compromised hosts (~500, high confidence)' },
+    { key: 'cinsArmy', name: 'CINS Army', url: 'https://cinsscore.com/list/ci-badguys.txt', listType: 'ip', description: 'CINS Active Threat Intelligence bad actors (~15k)' },
+    { key: 'sfsToxicDomains', name: 'StopForumSpam toxic domains', url: 'https://www.stopforumspam.com/downloads/toxic_domains_whole.txt', listType: 'email_domain', description: 'Email domains seen in spam signups (~75k — large)' },
+];

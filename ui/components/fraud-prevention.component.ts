@@ -282,8 +282,8 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                 <div class="mode-body">Score + log every order, flag the risky ones — but never hold anything. The safe way to tune thresholds.</div>
                             </label>
                             <label class="mode-card" [class.active]="current.mode === 'enforce'">
-                                <input type="radio" name="fmode" value="enforce" [(ngModel)]="current.mode" (ngModelChange)="markDirty()" [disabled]="meta && !meta.licensed">
-                                <div class="mode-title">Enforce <span class="mini-chip" *ngIf="meta && !meta.licensed">licence required</span></div>
+                                <input type="radio" name="fmode" value="enforce" [(ngModel)]="current.mode" (ngModelChange)="markDirty()" [disabled]="premiumLocked">
+                                <div class="mode-title">Enforce <span class="mini-chip" *ngIf="premiumLocked">licence required</span></div>
                                 <div class="mode-body">Risky orders are held in the review queue and licence keys wait for your approval.</div>
                             </label>
                         </div>
@@ -536,11 +536,11 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     <div class="card-block">
                         <div class="row-between">
                             <h3 class="step-title" style="margin:0">Threat feeds</h3>
-                            <button class="gbtn gbtn-primary gbtn-sm" (click)="syncAll()" [disabled]="syncBusy || (meta && !meta.licensed)">
+                            <button class="gbtn gbtn-primary gbtn-sm" (click)="syncAll()" [disabled]="syncBusy || premiumLocked">
                                 {{ syncBusy ? 'Syncing…' : 'Sync all now' }}
                             </button>
                         </div>
-                        <p class="hint">Public reputation lists, refreshed daily at 03:00. <span *ngIf="meta && !meta.licensed" class="warn-inline">Feed sync requires a licence — existing synced entries keep working.</span></p>
+                        <p class="hint">Public reputation lists, refreshed daily at 03:00. <span *ngIf="premiumLocked" class="warn-inline">Feed sync requires a licence — existing synced entries keep working.</span></p>
                         <table class="table">
                             <thead><tr><th>Feed</th><th>Type</th><th class="num-col">Entries</th><th>Last synced</th><th></th></tr></thead>
                             <tbody>
@@ -549,7 +549,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                     <td>{{ s.type }}</td>
                                     <td class="num-col">{{ feedCount(s.key) }}</td>
                                     <td class="hint">{{ feedUpdated(s.key) ? (feedUpdated(s.key) | date: 'd MMM HH:mm') : 'never' }}</td>
-                                    <td class="num-col"><button class="gbtn gbtn-outline gbtn-sm" (click)="syncOne(s.key)" [disabled]="syncBusy || (meta && !meta.licensed)">Sync</button></td>
+                                    <td class="num-col"><button class="gbtn gbtn-outline gbtn-sm" (click)="syncOne(s.key)" [disabled]="syncBusy || premiumLocked">Sync</button></td>
                                 </tr>
                             </tbody>
                         </table>
@@ -561,7 +561,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                 <div class="card">
                     <div class="card-block">
                         <h3 class="step-title">Custom feeds <small>your own threat-list URLs</small></h3>
-                        <p class="hint">Add any public line-based blocklist (one entry per line; <code class="mono">#</code> comments ignored). Synced nightly with the built-ins and matched exactly like them — CIDR ranges included. <span *ngIf="meta && !meta.licensed" class="warn-inline">Custom feeds require a licence.</span></p>
+                        <p class="hint">Add any public line-based blocklist (one entry per line; <code class="mono">#</code> comments ignored). Synced nightly with the built-ins and matched exactly like them — CIDR ranges included. <span *ngIf="premiumLocked" class="warn-inline">Custom feeds require a licence.</span></p>
                         <div class="picker">
                             <input class="form-input" style="min-width:150px" placeholder="Name (e.g. IPsum)" [(ngModel)]="newFeed.name">
                             <input class="form-input" style="flex:1;min-width:220px" placeholder="https://…/list.txt" [(ngModel)]="newFeed.url">
@@ -571,7 +571,11 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                 <option value="email_domain">email domain</option>
                                 <option value="email">email</option>
                             </select>
-                            <button class="gbtn gbtn-outline gbtn-sm" (click)="addFeed()" [disabled]="!newFeed.name || !newFeed.url || (meta && !meta.licensed)">+ Add feed</button>
+                            <button class="gbtn gbtn-outline gbtn-sm" (click)="addFeed()" [disabled]="!newFeed.name || !newFeed.url || premiumLocked">+ Add feed</button>
+                        </div>
+                        <div class="picker" style="margin-top:6px" *ngIf="availableFeedPresets.length">
+                            <span class="hint" style="align-self:center">One-click presets:</span>
+                            <button *ngFor="let p of availableFeedPresets" class="gbtn gbtn-outline gbtn-sm" [title]="p.description" (click)="addPresetFeed(p)" [disabled]="premiumLocked || presetBusy">+ {{ p.name }}</button>
                         </div>
                         <table class="table" *ngIf="customFeeds.length">
                             <thead><tr><th>Feed</th><th>Type</th><th class="num-col">Entries</th><th>Last synced</th><th>On</th><th></th></tr></thead>
@@ -584,7 +588,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                     <td class="hint">{{ f.lastSyncedAt ? (f.lastSyncedAt | date: 'd MMM HH:mm') : 'never' }}</td>
                                     <td><label class="check-label"><input type="checkbox" [checked]="!!f.enabled" (change)="toggleFeed(f)"></label></td>
                                     <td class="num-col case-actions">
-                                        <button class="gbtn gbtn-outline gbtn-sm" (click)="syncFeed(f)" [disabled]="syncBusy || (meta && !meta.licensed)">Sync</button>
+                                        <button class="gbtn gbtn-outline gbtn-sm" (click)="syncFeed(f)" [disabled]="syncBusy || premiumLocked">Sync</button>
                                         <button class="chip-x" (click)="removeFeed(f)" [attr.aria-label]="'Remove ' + f.name">×</button>
                                     </td>
                                 </tr>
@@ -1337,6 +1341,10 @@ export class FraudPreventionComponent implements OnInit {
     listStatus: any = null;
     sources: any[] = [];
     customFeeds: any[] = [];
+    feedPresets: any[] = [];
+    availableFeedPresets: any[] = [];
+    presetBusy = false;
+    premiumLocked = false;
     newFeed = { name: '', url: '', listType: 'ip' };
     newWl = { type: 'email', value: '', note: '' };
     newBl = { type: 'email', value: '', note: '' };
@@ -1413,7 +1421,7 @@ export class FraudPreventionComponent implements OnInit {
     ngOnInit() {
         this.reloadAll();
         this.http.get<any>('/fraud-prevention/meta').subscribe({
-            next: m => { this.meta = m; this.cdr.markForCheck(); },
+            next: m => { this.meta = m; this.premiumLocked = !!m && m.tier === 'free'; this.cdr.markForCheck(); },
             error: () => undefined,
         });
     }
@@ -1437,7 +1445,7 @@ export class FraudPreventionComponent implements OnInit {
                 this.activating = false;
                 this.licenceKeyInput = '';
                 this.notification.success(r?.message || 'Licence activated — all features enabled');
-                this.http.get<any>('/fraud-prevention/meta').subscribe({ next: m => { this.meta = m; this.cdr.markForCheck(); }, error: () => undefined });
+                this.http.get<any>('/fraud-prevention/meta').subscribe({ next: m => { this.meta = m; this.premiumLocked = !!m && m.tier === 'free'; this.cdr.markForCheck(); }, error: () => undefined });
                 this.cdr.markForCheck();
             },
             error: (e) => {
@@ -1635,7 +1643,33 @@ export class FraudPreventionComponent implements OnInit {
         this.http.get<any[]>('/fraud-prevention/lists/blocklist').subscribe({ next: r => { this.bl = r; this.cdr.markForCheck(); }, error: () => undefined });
         this.http.get<any>('/fraud-prevention/lists/status').subscribe({ next: r => { this.listStatus = r; this.cdr.markForCheck(); }, error: () => undefined });
         this.http.get<any[]>('/fraud-prevention/lists/sources').subscribe({ next: r => { this.sources = r; this.cdr.markForCheck(); }, error: () => undefined });
-        this.http.get<any[]>('/fraud-prevention/feeds/custom').subscribe({ next: r => { this.customFeeds = r; this.cdr.markForCheck(); }, error: () => undefined });
+        this.http.get<any[]>('/fraud-prevention/feeds/custom').subscribe({ next: r => { this.customFeeds = r; this.recomputeFeedPresets(); this.cdr.markForCheck(); }, error: () => undefined });
+        this.http.get<any[]>('/fraud-prevention/feeds/presets').subscribe({ next: r => { this.feedPresets = r || []; this.recomputeFeedPresets(); this.cdr.markForCheck(); }, error: () => undefined });
+    }
+
+    /** Presets not yet added (matched by URL). Kept as a plain array so the
+     *  template never calls a method during change detection. */
+    private recomputeFeedPresets() {
+        const have = new Set((this.customFeeds || []).map((f: any) => String(f.url || '').trim()));
+        this.availableFeedPresets = (this.feedPresets || []).filter((p: any) => !have.has(p.url));
+    }
+
+    addPresetFeed(p: any) {
+        this.presetBusy = true;
+        this.http.post<any>('/fraud-prevention/feeds/custom', { name: p.name, url: p.url, listType: p.listType }).subscribe({
+            next: r => {
+                this.presetBusy = false;
+                if (r.ok) {
+                    this.notification.success(`${p.name} added — syncing…`);
+                    if (r.id) this.http.post(`/fraud-prevention/feeds/custom/${r.id}`, { sync: true }).subscribe({ next: () => this.loadLists(), error: () => undefined });
+                    this.loadLists();
+                } else {
+                    this.notification.error(r.message || 'Could not add feed');
+                }
+                this.cdr.markForCheck();
+            },
+            error: err => { this.presetBusy = false; this.notification.error(err?.error?.message || 'Could not add feed'); this.cdr.markForCheck(); },
+        });
     }
 
     addEntry(list: 'whitelist' | 'blocklist') {
