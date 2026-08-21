@@ -90,10 +90,28 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
 
         <!-- Licence + update banners -->
         <vdr-page-block *ngIf="meta && !meta.licensed">
-            <div class="update-banner major">
+            <div class="update-banner major" *ngIf="meta.tier === 'trial'">
                 <div>
-                    <strong>🔓 Free tier</strong> — monitoring, manual lists and simulate are active. Enforce mode,
-                    review-queue holds, threat-feed sync and email alerts need a licence.
+                    <strong>⏳ Full-featured evaluation</strong> —
+                    <ng-container *ngIf="meta.eval?.daysRemaining != null; else evalNoClock">
+                        <strong>{{ meta.eval.daysRemaining }} day{{ meta.eval.daysRemaining === 1 ? '' : 's' }} left</strong> with everything enabled — enforce mode, review-queue holds, threat feeds and email alerts included.
+                    </ng-container>
+                    <ng-template #evalNoClock>everything is enabled — enforce mode, review-queue holds, threat feeds and email alerts included.</ng-template>
+                    Afterwards the plugin drops to the free tier (monitor + simulate only).
+                </div>
+                <div class="actions eval-actions">
+                    <ng-container *ngIf="!remindMeSent">
+                        <input class="eval-email" type="email" placeholder="you@company.com" [(ngModel)]="remindEmail" [disabled]="remindMeSending">
+                        <button class="gbtn gbtn-outline gbtn-sm" (click)="sendRemindMe()" [disabled]="remindMeSending || !remindEmail">{{ remindMeSending ? 'Saving…' : 'Email me before it ends' }}</button>
+                    </ng-container>
+                    <span *ngIf="remindMeSent" class="eval-ok">✓ We'll email you before it ends</span>
+                    <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-primary gbtn-sm">Keep it — get a licence ↗</a>
+                </div>
+            </div>
+            <div class="update-banner major" *ngIf="meta.tier !== 'trial'">
+                <div>
+                    <strong>🔓 Free tier</strong> — your evaluation has ended. Monitoring, manual lists and simulate stay active; enforce mode,
+                    review-queue holds, threat-feed sync and email alerts need a licence. Your rules are saved and reactivate instantly with a key.
                 </div>
                 <div class="actions">
                     <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-primary gbtn-sm">Get a licence ↗</a>
@@ -1257,6 +1275,9 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
         }
         .update-banner.major { background: var(--gb-tint-warn); border-color: var(--gb-line-warn); }
         .update-banner .actions { display: flex; gap: 6px; align-items: center; }
+        .eval-actions { align-items:center; }
+        .eval-email { padding:5px 9px; border:1px solid var(--gb-ui-border); border-radius:7px; font-size:12.5px; min-width:190px; background:#fff; color:#0f172a; }
+        .eval-ok { font-size:12.5px; color:var(--gb-strong); font-weight:600; }
 
         @media (prefers-reduced-motion: reduce) {
             .gbtn, .tab, .seg, .mode-card, .save-bar { transition: none; }
@@ -1276,6 +1297,9 @@ export class FraudPreventionComponent implements OnInit {
     tab: Tab = 'overview';
 
     meta: any = null;
+    remindEmail = '';
+    remindMeSending = false;
+    remindMeSent = false;
     configs: FraudConfig[] = [];
     currentIdx = 0;
     dirty = false;
@@ -1382,6 +1406,16 @@ export class FraudPreventionComponent implements OnInit {
         this.http.get<any>('/fraud-prevention/meta').subscribe({
             next: m => { this.meta = m; this.cdr.markForCheck(); },
             error: () => undefined,
+        });
+    }
+
+    sendRemindMe() {
+        const email = (this.remindEmail || '').trim();
+        if (!email) return;
+        this.remindMeSending = true;
+        this.http.post<any>('/fraud-prevention/eval/remind-me', { email }).subscribe({
+            next: () => { this.remindMeSending = false; this.remindMeSent = true; this.notification.success('Reminder set — check your inbox for a confirmation'); this.cdr.markForCheck(); },
+            error: () => { this.remindMeSending = false; this.notification.error('Could not save the reminder — try again shortly'); this.cdr.markForCheck(); },
         });
     }
 

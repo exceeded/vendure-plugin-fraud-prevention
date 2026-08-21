@@ -5,6 +5,27 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — 2026-08-21
+
+### Added
+- Evaluation pings now include anonymous usage aggregates (counts only,
+  never personal data) so the opt-in reminder emails can say what the
+  plugin actually did during the trial.
+
+## [0.9.0] — 2026-08-21
+
+### Added
+- **14-day full-featured evaluation.** Unlicensed installs now get the
+  complete feature set for 14 days instead of the restricted free tier.
+  Enforce mode, review-queue holds, threat feeds and alerts now also run during the evaluation window. The clock is anchored server-side (a hashed
+  instance id — no personal data), so reinstalling does not restart it,
+  and it fails open: if the licence server is unreachable the plugin
+  keeps running fully. After the window the plugin drops to the free
+  tier; all configuration is kept and reactivates instantly with a key.
+- Admin-UI evaluation banner with live countdown and an optional
+  "email me before it ends" reminder opt-in (explicit consent — no
+  email is sent anywhere otherwise).
+
 ## [0.8.0] — 2026-08-04
 
 ### Added

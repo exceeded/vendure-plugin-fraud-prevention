@@ -64,7 +64,32 @@ export class FraudPreventionController {
             update: updater ? updater.getStatus() : null,
             licensed: !!licence?.valid,
             licenceMessage: licence?.valid ? '' : (licence?.message || 'No licence key configured'),
+            tier: licence?.valid ? 'paid' : (FraudPreventionPlugin.getEvalState()?.active ? 'trial' : 'free'),
+            eval: FraudPreventionPlugin.getEvalState(),
         });
+    }
+
+    /** Admin opt-in: "email me before my evaluation ends". Proxied
+     *  server-to-server to the HULO licence server, which sends a
+     *  welcome email and runs the reminder drip. Explicit consent only. */
+    @Post('eval/remind-me')
+    async evalRemindMe(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        const email = String(body?.email || '').trim();
+        const instanceId = FraudPreventionPlugin.getEvalInstanceId();
+        if (!email || !instanceId) return res.status(400).json({ error: 'bad-request' });
+        try {
+            const base = (process.env.HULO_LICENCE_EVAL_URL || 'https://elite.charity/licence/eval/register').replace(/\/register$/, '');
+            const resp = await fetch(`${base}/lead`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ plugin: FraudPreventionPlugin.getPackageName(), instanceId, email }),
+            });
+            if (!resp.ok) return res.status(502).json({ error: 'upstream', status: resp.status });
+            return res.json({ ok: true });
+        } catch {
+            return res.status(502).json({ error: 'unreachable' });
+        }
     }
 
     // ── Admin: config ──────────────────────────────────────────────────
@@ -285,7 +310,7 @@ export class FraudPreventionController {
         @Body() body: { name: string; url: string; listType: string },
     ) {
         if (denyUnlessAdmin(ctx, res, true)) return;
-        if (!FraudPreventionPlugin.isLicensed()) {
+        if (!FraudPreventionPlugin.hasPremiumAccess()) {
             return res.status(402).json({ error: 'licence_required', message: 'Custom feeds require a licence.' });
         }
         const result = await this.service.addCustomFeed(body.name, body.url, body.listType);
@@ -299,7 +324,7 @@ export class FraudPreventionController {
     ) {
         if (denyUnlessAdmin(ctx, res, true)) return;
         if (body?.sync) {
-            if (!FraudPreventionPlugin.isLicensed()) {
+            if (!FraudPreventionPlugin.hasPremiumAccess()) {
                 return res.status(402).json({ error: 'licence_required', message: 'Feed sync requires a licence.' });
             }
             return res.json(await this.service.syncCustomFeed(Number(id)));
@@ -318,7 +343,7 @@ export class FraudPreventionController {
     @Post('lists/sync')
     async sync(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: { sourceKey?: string }) {
         if (denyUnlessAdmin(ctx, res, true)) return;
-        if (!FraudPreventionPlugin.isLicensed()) {
+        if (!FraudPreventionPlugin.hasPremiumAccess()) {
             return res.status(402).json({
                 error: 'licence_required',
                 message: 'Threat-feed sync requires a licence — https://huloglobal.com/vendure-plugins/fraud-prevention/',

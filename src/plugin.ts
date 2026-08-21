@@ -6,8 +6,7 @@ import {
     RevocationChecker,
     UpdateChecker,
     verifyLicence,
-    warnIfIncompatibleVendure,
-} from '@huloglobal/vendure-licence-sdk';
+    warnIfIncompatibleVendure, EvaluationClient, EvaluationState } from '@huloglobal/vendure-licence-sdk';
 
 import { FraudPreventionService } from './fraud-prevention.service';
 import { FraudPreventionController } from './fraud-prevention.controller';
@@ -63,6 +62,28 @@ export function getOptions(): FraudPluginInitOptions { return cachedOptions; }
     compatibility: '^3.0.0',
 })
 export class FraudPreventionPlugin {
+    private static evalClientInternal: EvaluationClient | null = null;
+    static getEvalState(): EvaluationState | null { return FraudPreventionPlugin.evalClientInternal?.getState() ?? null; }
+    static getEvalInstanceId(): string | null { return FraudPreventionPlugin.evalClientInternal?.getInstanceId() ?? null; }
+    /** Licensed installs AND installs inside the 14-day server-anchored
+     *  evaluation window get the full feature set. After the window the
+     *  plugin drops to the free tier. */
+    static hasPremiumAccess(): boolean {
+        if (FraudPreventionPlugin.licenceStatus?.valid) return true;
+        return !!FraudPreventionPlugin.evalClientInternal?.getState()?.active;
+    }
+    static startEvaluation(): void {
+        if (!FraudPreventionPlugin.evalClientInternal) {
+            FraudPreventionPlugin.evalClientInternal = new EvaluationClient({ packageName: PKG_NAME, packageVersion: PKG_VERSION });
+            FraudPreventionPlugin.evalClientInternal.start();
+        }
+    }
+
+    constructor(service: FraudPreventionService) {
+        // Anonymous aggregates for the (opt-in) evaluation reminder emails.
+        FraudPreventionPlugin.evalClientInternal?.setStatsProvider(() => service.evalStats());
+    }
+
     private static revocation: RevocationChecker | null = null;
     private static updateChecker: UpdateChecker | null = null;
     private static heartbeat: Heartbeat | null = null;
@@ -105,6 +126,9 @@ export class FraudPreventionPlugin {
         FraudPreventionPlugin.licenceStatus = status;
 
         if (!status.valid) {
+            // Unlicensed: start the server-anchored 14-day full-featured
+            // evaluation; premium paths stay on until it expires.
+            FraudPreventionPlugin.startEvaluation();
             // eslint-disable-next-line no-console
             console.warn(
                 `[${PKG_NAME}] ${status.message}` +

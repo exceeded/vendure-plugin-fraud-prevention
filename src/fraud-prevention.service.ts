@@ -62,6 +62,13 @@ export class FraudPreventionService implements OnModuleInit {
         return this.connection.rawConnection;
     }
 
+    /** Anonymous usage aggregates for the evaluation drip (numbers only). */
+    async evalStats(): Promise<Record<string, number>> {
+        const [held] = await this.db.query(`SELECT COUNT(*) AS n FROM fraud_blocked_orders`);
+        const [blocked] = await this.db.query(`SELECT COUNT(*) AS n FROM fraud_blocked_orders WHERE riskLevel = 'blocked'`);
+        return { ordersHeld: Number(held?.n || 0), ordersBlocked: Number(blocked?.n || 0) };
+    }
+
     // ── Schema ──────────────────────────────────────────────────────────
     /**
      * Table names are inherited from the pre-plugin implementation so an
@@ -525,7 +532,7 @@ export class FraudPreventionService implements OnModuleInit {
         if (effectiveMode === 'enforce') {
             // Lazy import avoids a static plugin<->service cycle at load time.
             const { FraudPreventionPlugin } = require('./plugin');
-            if (!FraudPreventionPlugin.isLicensed()) effectiveMode = 'monitor';
+            if (!FraudPreventionPlugin.hasPremiumAccess()) effectiveMode = 'monitor';
         }
 
         let action: FraudAssessment['action'] = 'allow';

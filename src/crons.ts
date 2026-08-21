@@ -18,7 +18,7 @@ export class FraudCrons {
     async syncFeeds() {
         if (this.processContext.isServer) return; // worker only
         if (getOptions().disableFeedSync) return;
-        if (!FraudPreventionPlugin.isLicensed()) return;
+        if (!FraudPreventionPlugin.hasPremiumAccess()) return;
         Logger.info('Daily threat-feed sync starting…', loggerCtx);
         const { results } = await this.service.syncAll();
         for (const r of results) {
