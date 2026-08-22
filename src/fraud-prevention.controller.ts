@@ -320,6 +320,15 @@ export class FraudPreventionController {
         return res.json({ success: true });
     }
 
+    /** Fraud panel on the admin order-detail page. */
+    @Get('order-assessment/:orderId')
+    async orderAssessment(@Ctx() ctx: RequestContext, @Res() res: Response, @Param('orderId') orderId: string) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        const id = Number(orderId);
+        if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'bad-order-id' });
+        return res.json(await this.service.orderAssessment(id));
+    }
+
     // ── Custom feeds (user-defined threat-list URLs) ───────────────────
     /** Curated well-known feeds for one-click adding in the UI. */
     @Get('feeds/presets')

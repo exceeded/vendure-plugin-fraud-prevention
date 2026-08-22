@@ -5,6 +5,15 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-08-22
+
+### Added
+- **Fraud panel on the admin order page.** Every paid order's detail
+  page now shows the risk score (/100), level, contributing signals and
+  review-case status, colour-coded and adapted to the admin light/dark
+  theme. Only rendered once the order has a settled payment. New
+  GET order-assessment/:orderId admin endpoint.
+
 ## [0.11.0] — 2026-08-21
 
 ### Added

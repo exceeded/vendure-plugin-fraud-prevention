@@ -206,6 +206,11 @@ export class FraudPreventionPlugin {
                 ngModuleFileName: 'fraud-prevention.module.ts',
                 ngModuleName: 'FraudPreventionModule',
             },
+            {
+                type: 'shared' as const,
+                ngModuleFileName: 'order-fraud-shared.module.ts',
+                ngModuleName: 'OrderFraudSharedModule',
+            },
         ],
     };
 }

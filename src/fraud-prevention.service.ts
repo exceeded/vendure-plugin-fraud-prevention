@@ -578,6 +578,31 @@ export class FraudPreventionService implements OnModuleInit {
         return false;
     }
 
+    /** Everything we know about one order, for the admin order-detail
+     *  panel: latest assessments (every order gets one) + the review
+     *  case if the order was held/blocked. */
+    async orderAssessment(orderId: number): Promise<any> {
+        const assessments = await this.db.query(
+            `SELECT riskScore, riskLevel, reasons, action, signals, createdAt
+             FROM fraud_log WHERE orderId = ? ORDER BY createdAt DESC LIMIT 5`, [orderId]).catch(() => []);
+        const [caseRow] = await this.db.query(
+            `SELECT status, riskLevel, riskScore, reasons, createdAt
+             FROM fraud_blocked_orders WHERE orderId = ? ORDER BY id DESC LIMIT 1`, [orderId]).catch(() => []);
+        const latest = assessments[0] || null;
+        let signals: any[] = [];
+        try { signals = latest?.signals ? JSON.parse(latest.signals) : []; } catch { /* legacy rows */ }
+        return {
+            assessed: !!latest,
+            score: latest ? Number(latest.riskScore) : null,
+            level: latest?.riskLevel || null,
+            action: latest?.action || null,
+            assessedAt: latest?.createdAt || null,
+            signals,
+            reasons: latest?.reasons || '',
+            case: caseRow || null,
+        };
+    }
+
     // ── Logging + cases ────────────────────────────────────────────────
     async logAssessment(input: AssessInput, a: FraudAssessment): Promise<void> {
         await this.db.query(
