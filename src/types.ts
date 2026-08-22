@@ -23,9 +23,14 @@ export interface FraudAssessment {
     level: RiskLevel;
     signals: FraudSignal[];
     allowlisted: boolean;
-    /** What the engine decided to do given the channel mode. */
-    action: 'allow' | 'flag' | 'review' | 'block';
+    /** What the engine decided to do given the channel mode. 'shadow'
+     *  means the order scored risky but protection was OFF, so no
+     *  action was taken — surfaced to admins as a nudge to enable it. */
+    action: 'allow' | 'flag' | 'review' | 'block' | 'shadow';
     mode: FraudMode;
+    /** False when the channel was disabled/off at scoring time — the
+     *  engine still scores (shadow mode) so the data is never blind. */
+    protectionActive?: boolean;
 }
 
 /** Per-channel configuration row (table `fraud_config`). */

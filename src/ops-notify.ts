@@ -27,7 +27,7 @@ export interface OpsChannels {
 }
 
 export interface OpsEvent {
-    event: 'case.held' | 'case.approved' | 'case.rejected' | 'case.auto_released';
+    event: 'case.held' | 'case.approved' | 'case.rejected' | 'case.auto_released' | 'shadow.risky';
     text: string;
     orderCode?: string;
     email?: string;

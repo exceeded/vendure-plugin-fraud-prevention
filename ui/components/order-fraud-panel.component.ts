@@ -26,6 +26,9 @@ import { CustomDetailComponent, SharedModule } from '@vendure/admin-ui/core';
             <span class="lvl-label" *ngIf="!data.assessed">No assessment recorded for this order</span>
         </div>
         <div class="fraud-body" *ngIf="data.assessed">
+            <div class="shadow-note" *ngIf="data.action === 'shadow'">
+                ⚠️ Scored while fraud protection was <strong>switched off</strong> — no action was taken. Enable protection to hold orders like this.
+            </div>
             <div class="case-line" *ngIf="data.case">
                 Review case: <strong>{{ data.case.status }}</strong>
                 <span class="hint-inline" *ngIf="data.case.status === 'pending'">— this order is waiting in the fraud review queue</span>
@@ -65,6 +68,7 @@ import { CustomDetailComponent, SharedModule } from '@vendure/admin-ui/core';
         .sig-detail { color: #64748b; flex: 1; }
         .sig-pts { font-weight: 700; color: #b45309; }
         .assessed-at { margin-top: 8px; font-size: 11.5px; color: #94a3b8; }
+        .shadow-note { margin: 4px 0 8px; padding: 6px 10px; border-radius: 8px; background: #fffbeb; border: 1px solid #fbbf24; color: #92400e; font-size: 12.5px; }
 
         :host-context([data-theme='dark']) .fraud-card { background: #1e293b; border-color: #334155; color: #e2e8f0; }
         :host-context([data-theme='dark']) .lvl-label, :host-context([data-theme='dark']) .case-line { color: #94a3b8; }
@@ -75,6 +79,7 @@ import { CustomDetailComponent, SharedModule } from '@vendure/admin-ui/core';
         :host-context([data-theme='dark']) .toggle-btn:hover { background: #334155; }
         :host-context([data-theme='dark']) .signal-list li { border-bottom-color: #334155; }
         :host-context([data-theme='dark']) .sig-detail { color: #94a3b8; }
+        :host-context([data-theme='dark']) .shadow-note { background: rgba(251,191,36,.12); border-color: #b45309; color: #fcd34d; }
     `],
 })
 export class OrderFraudPanelComponent implements CustomDetailComponent, OnInit, OnDestroy {

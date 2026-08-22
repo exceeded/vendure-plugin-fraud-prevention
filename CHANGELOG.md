@@ -5,6 +5,17 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] — 2026-08-22
+
+### Changed
+- **"Off" no longer means "blind".** When protection is disabled the
+  engine still evaluates every rule and records a shadow assessment
+  (action 'shadow', never any holds). Risky shadow-scored orders warn in
+  the server log, fan out to the ops channels (new 'shadow.risky'
+  event), optionally email the admin, and the order-detail panel shows a
+  "scored while protection was off" notice — so switching protection off
+  never silently loses the risk picture.
+
 ## [0.12.0] — 2026-08-22
 
 ### Added

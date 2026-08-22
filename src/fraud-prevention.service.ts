@@ -324,9 +324,11 @@ export class FraudPreventionService implements OnModuleInit {
             if (points !== 0) signals.push({ key, label, points, detail });
         };
 
-        if (!cfg.enabled || cfg.mode === 'off') {
-            return { score: 0, level: 'low', signals: [], allowlisted: false, action: 'allow', mode: cfg.mode };
-        }
+        // Even when protection is disabled we still evaluate every rule —
+        // "off" must never mean "blind". The result is recorded as a
+        // shadow assessment (no action, no holds) so admins can see what
+        // protection WOULD have caught and be nudged to switch it on.
+        const protectionOff = !cfg.enabled || cfg.mode === 'off';
 
         const norm = input.email ? normalizeEmail(input.email) : null;
 
@@ -554,10 +556,11 @@ export class FraudPreventionService implements OnModuleInit {
 
         let action: FraudAssessment['action'] = 'allow';
         if (level === 'review' || level === 'blocked') {
-            action = effectiveMode === 'enforce' ? (level === 'blocked' ? 'block' : 'review') : 'flag';
+            action = protectionOff ? 'shadow'
+                : effectiveMode === 'enforce' ? (level === 'blocked' ? 'block' : 'review') : 'flag';
         }
 
-        return { score, level, signals, allowlisted: false, action, mode: effectiveMode };
+        return { score, level, signals, allowlisted: false, action, mode: effectiveMode, protectionActive: !protectionOff };
     }
 
     private async isAllowlisted(email?: string, domain?: string, ip?: string): Promise<boolean> {

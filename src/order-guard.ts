@@ -56,9 +56,45 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
         };
 
         const assessment = await this.service.assess(input);
-        if (assessment.mode === 'off') return;
 
+        // Always log — shadow assessments included, so the score history
+        // has no blind spots even while protection is switched off.
         await this.service.logAssessment(input, assessment);
+
+        if (assessment.protectionActive === false) {
+            if (assessment.action === 'shadow') {
+                Logger.warn(
+                    `Order ${order.code} scored ${assessment.score}/100 (${assessment.level}) but fraud protection is OFF — no action taken. ` +
+                    `Signals: ${assessment.signals.map(s => s.label).join(', ')}`,
+                    loggerCtx,
+                );
+                await this.service.notifyOps({
+                    event: 'shadow.risky',
+                    text: `⚠️ Fraud protection is OFF, but order ${order.code} scored ${assessment.score}/100 (${assessment.level}). ` +
+                        `No action was taken. Signals: ${assessment.signals.map(s => s.label).join(', ')}. ` +
+                        `Enable protection in the Fraud Prevention settings to act on orders like this.`,
+                    orderCode: order.code,
+                    email,
+                    score: assessment.score,
+                    level: assessment.level,
+                    signals: assessment.signals.map(s => ({ key: s.key, label: s.label, points: s.points })),
+                });
+                const notif = await this.service.getNotificationConfig();
+                if (notif.notifyOnHighRisk) {
+                    await this.service.sendAdminAlert(
+                        `Protection inactive: order ${order.code} scored ${assessment.score}/100`,
+                        `<h2>⚠️ Fraud protection scored this order — but is switched OFF</h2>
+                         <p><strong>Order:</strong> ${order.code}</p>
+                         <p><strong>Customer:</strong> ${email}</p>
+                         <p><strong>Risk score:</strong> ${assessment.score}/100 (${assessment.level})</p>
+                         <ul>${assessment.signals.map(s => `<li>${s.label} (+${s.points}): ${s.detail}</li>`).join('')}</ul>
+                         <p><strong>No action was taken</strong> because protection is disabled for this channel.
+                         Enable it in Fraud Prevention → Settings to hold orders like this automatically.</p>`,
+                    );
+                }
+            }
+            return;
+        }
 
         if (assessment.action === 'allow' || assessment.action === 'flag') {
             if (assessment.action === 'flag') {
