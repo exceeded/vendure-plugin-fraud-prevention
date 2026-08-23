@@ -132,7 +132,8 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     <!--email_off-->{{ meta.name }} {{ meta.version }} → <strong>{{ meta.update.latest }}</strong><!--/email_off-->
                 </div>
                 <div class="actions">
-                    <button class="gbtn gbtn-outline gbtn-sm" (click)="meta.update = null">Dismiss</button>
+                    <button class="gbtn gbtn-primary gbtn-sm" *ngIf="meta?.selfUpdate?.allowed" (click)="runSelfUpdate()" [disabled]="updating">{{ updating ? updateProgress : 'Update now' }}</button>
+                    <button class="gbtn gbtn-outline gbtn-sm" (click)="meta.update = null" [disabled]="updating">Dismiss</button>
                 </div>
             </div>
         </vdr-page-block>
@@ -1308,6 +1309,59 @@ export class FraudPreventionComponent implements OnInit {
     tab: Tab = 'overview';
 
     meta: any = null;
+    updating = false;
+    updateProgress = 'Updating…';
+
+    runSelfUpdate() {
+        const target = this.meta?.update?.latest;
+        if (!target || this.updating) return;
+        this.updating = true;
+        this.updateProgress = 'Installing…';
+        this.cdr.markForCheck();
+        this.http.post<any>('/fraud-prevention/update/run', { version: target }).subscribe({
+            next: r => {
+                if (r?.restartScheduled) {
+                    this.updateProgress = 'Restarting…';
+                    this.notification.success(r.message || 'Updated — server restarting');
+                    this.pollAfterRestart(target);
+                } else {
+                    this.updating = false;
+                    this.notification.success(r?.message || 'Installed — restart the server to load it');
+                }
+                this.cdr.markForCheck();
+            },
+            error: e => {
+                this.updating = false;
+                this.notification.error(e?.error?.message || 'Update failed — nothing was changed');
+                this.cdr.markForCheck();
+            },
+        });
+    }
+
+    private pollAfterRestart(target: string, attempt = 0) {
+        if (attempt > 40) {
+            this.updating = false;
+            this.notification.error('The server has not come back yet — check your process manager');
+            this.cdr.markForCheck();
+            return;
+        }
+        setTimeout(() => {
+            this.http.get<any>('/fraud-prevention/meta').subscribe({
+                next: m => {
+                    const v = m?.version || m?.update?.current;
+                    if (v === target) {
+                        this.updating = false;
+                        this.meta = m;
+                        this.notification.success(`Now running v${target}`);
+                        this.cdr.markForCheck();
+                    } else {
+                        this.pollAfterRestart(target, attempt + 1);
+                    }
+                },
+                error: () => this.pollAfterRestart(target, attempt + 1),
+            });
+        }, 3000);
+    }
     remindEmail = '';
     remindMeSending = false;
     remindMeSent = false;

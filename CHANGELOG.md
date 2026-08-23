@@ -5,6 +5,20 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-08-23
+
+### Added
+- **One-click in-app updates.** The update banner now has an "Update
+  now" button: the plugin installs the new version via your project's
+  own package manager (yarn/npm/pnpm auto-detected), verifies it landed,
+  and gracefully restarts under your process supervisor (pm2/systemd).
+  Admin-only; the target version is verified against the npm registry;
+  a failed install never restarts anything. Disable with
+  HULO_SELF_UPDATE=off; force restart without a detected supervisor
+  with HULO_SELF_UPDATE=force. Note: a separate worker process picks
+  the update up on its next restart, and the admin UI itself refreshes
+  after your next admin build.
+
 ## [0.13.0] — 2026-08-22
 
 ### Changed

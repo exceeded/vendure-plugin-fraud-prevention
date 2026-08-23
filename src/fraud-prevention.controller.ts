@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Post, Query, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Ctx, Permission, RequestContext } from '@vendure/core';
-import { RateLimiter } from '@huloglobal/vendure-licence-sdk';
+import { RateLimiter, performSelfUpdate, selfUpdateEnv } from '@huloglobal/vendure-licence-sdk';
 
 import { FraudPreventionService } from './fraud-prevention.service';
 import { FraudPreventionPlugin } from './plugin';
@@ -62,11 +62,26 @@ export class FraudPreventionController {
             name: FraudPreventionPlugin.getPackageName(),
             version: FraudPreventionPlugin.getPackageVersion(),
             update: updater ? updater.getStatus() : null,
+            selfUpdate: selfUpdateEnv(),
             licensed: !!licence?.valid,
             licenceMessage: licence?.valid ? '' : (licence?.message || 'No licence key configured'),
             tier: licence?.valid ? 'paid' : (FraudPreventionPlugin.getEvalState()?.active ? 'trial' : 'free'),
             eval: FraudPreventionPlugin.getEvalState(),
         });
+    }
+
+    /** One-click in-app update (owner-approved feature): installs a
+     *  registry-verified version of THIS plugin via the host's package
+     *  manager and restarts under the process supervisor. Admin-only;
+     *  package name is hard-coded; HULO_SELF_UPDATE=off disables. */
+    @Post('update/run')
+    async updateRun(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        const updater = FraudPreventionPlugin.getUpdateChecker();
+        const target = String(body?.version || updater?.getStatus()?.latest || '').trim();
+        if (!target) return res.status(400).json({ ok: false, message: 'No target version known yet — the registry check runs daily; try again shortly.' });
+        const result = await performSelfUpdate({ packageName: FraudPreventionPlugin.getPackageName(), targetVersion: target });
+        return res.status(result.ok ? 200 : 400).json(result);
     }
 
     /** Admin-UI licence activation: paste the key from the purchase
