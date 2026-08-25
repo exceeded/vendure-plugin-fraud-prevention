@@ -5,6 +5,13 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] — 2026-08-25
+
+### Added
+- **"What's new" in the update banner.** The banner now links
+  straight to this plugin's changelog page on huloglobal.com, so you
+  can read exactly what a release contains before updating.
+
 ## [0.14.0] — 2026-08-23
 
 ### Added
