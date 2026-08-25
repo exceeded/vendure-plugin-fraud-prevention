@@ -133,6 +133,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                 </div>
                 <div class="actions">
                     <button class="gbtn gbtn-primary gbtn-sm" *ngIf="meta?.selfUpdate?.allowed" (click)="runSelfUpdate()" [disabled]="updating">{{ updating ? updateProgress : 'Update now' }}</button>
+                    <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/changelog/" target="_blank" class="gbtn gbtn-outline gbtn-sm">What&rsquo;s new ↗</a>
                     <button class="gbtn gbtn-outline gbtn-sm" (click)="meta.update = null" [disabled]="updating">Dismiss</button>
                 </div>
             </div>
