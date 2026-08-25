@@ -1,4 +1,4 @@
-import { LicenceStore } from '@huloglobal/vendure-licence-sdk';
+import { LicenceStore, adapterFor } from '@huloglobal/vendure-licence-sdk';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Logger, TransactionalConnection } from '@vendure/core';
 import * as nodemailer from 'nodemailer';
@@ -60,7 +60,7 @@ export class FraudPreventionService implements OnModuleInit {
     }
 
     private get db() {
-        return this.connection.rawConnection;
+        return adapterFor(this.connection.rawConnection);
     }
 
     private licenceStore = new LicenceStore((sql, params) => this.db.query(sql, params));
@@ -308,6 +308,7 @@ export class FraudPreventionService implements OnModuleInit {
                 c.autoApproveAfterHours || 0, (c as any).notifyCustomerOnHold || 'block',
                 (c as any).reviewHours || 24, JSON.stringify(c.signalWeights || {}),
             ],
+            { conflictColumns: ['channelId'] },
         );
     }
 
@@ -630,6 +631,7 @@ export class FraudPreventionService implements OnModuleInit {
                 a.signals.map(s => `${s.label}: ${s.detail}`).join('; '),
                 JSON.stringify(a.signals),
             ],
+            { needInsertId: true },
         );
         return res.insertId;
     }
@@ -745,6 +747,7 @@ export class FraudPreventionService implements OnModuleInit {
         const res = await this.db.query(
             `DELETE FROM fraud_log WHERE createdAt < DATE_SUB(NOW(), INTERVAL ? DAY)`,
             [retentionDays],
+            { needAffected: true },
         );
         return res.affectedRows || 0;
     }
@@ -865,6 +868,7 @@ export class FraudPreventionService implements OnModuleInit {
             `INSERT INTO fraud_custom_feed (name, url, listType, enabled, createdAt, updatedAt)
              VALUES (?, ?, ?, 1, NOW(), NOW())`,
             [cleanName, cleanUrl, type],
+            { needInsertId: true },
         );
         return { ok: true, id: res.insertId };
     }
@@ -982,6 +986,7 @@ export class FraudPreventionService implements OnModuleInit {
                  ON DUPLICATE KEY UPDATE countryCode=VALUES(countryCode), isVpnOrProxy=VALUES(isVpnOrProxy),
                     isHosting=VALUES(isHosting), checkedAt=NOW()`,
                 [intel.ip, intel.countryCode, intel.isVpnOrProxy ? 1 : 0, intel.isHosting ? 1 : 0],
+                { conflictColumns: ['ip'] },
             ).catch(() => undefined);
         }
         return intel;
@@ -1134,6 +1139,7 @@ export class FraudPreventionService implements OnModuleInit {
             `INSERT INTO fraud_message_templates (channelId, kind, subject, body) VALUES (?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE subject = VALUES(subject), body = VALUES(body)`,
             [channelId, kind, subject, body],
+            { conflictColumns: ['channelId', 'kind'] },
         );
     }
 
@@ -1204,6 +1210,7 @@ export class FraudPreventionService implements OnModuleInit {
              body.slackWebhookUrl || null, body.discordWebhookUrl || null, body.teamsWebhookUrl || null,
              body.telegramBotToken || null, body.telegramChatId || null,
              body.genericWebhookUrl || null, body.genericWebhookSecret || null],
+            { conflictColumns: ['id'] },
         );
     }
 
