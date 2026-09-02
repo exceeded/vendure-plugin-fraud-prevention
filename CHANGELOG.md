@@ -5,6 +5,11 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] — 2026-09-02
+
+### Changed
+- **Branding.** The bundled `hulo-global-logo.svg` is now the HG wordmark on the HULO black rounded square (the same mark as the huloglobal.com header), with explicit `-light` and `-dark` variants alongside the auto-switching default.
+
 ## [0.17.0] — 2026-09-02
 
 ### Added
