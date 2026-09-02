@@ -172,7 +172,7 @@ export class FraudPreventionPlugin {
         FraudPreventionPlugin.licenceStatus = status;
 
         if (!status.valid) {
-            // Unlicensed: start the server-anchored 14-day full-featured
+            // Unlicensed: register the install (no premium is granted by this; the 14-day
             // evaluation; premium paths stay on until it expires.
             FraudPreventionPlugin.startEvaluation();
             // eslint-disable-next-line no-console

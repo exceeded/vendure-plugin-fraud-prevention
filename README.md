@@ -108,4 +108,4 @@ AGPL-3.0-or-later — commercial licences available from HULO Global.
 
 ## Buying a licence
 
-Click **Buy licence** in the plugin's admin page (evaluation or free-tier banner), pick monthly, annual or lifetime, and complete checkout in the new tab — the key installs itself within a minute. You can also buy at https://elite.charity/licence/buy/vendure-plugin-fraud-prevention and paste the emailed key into the admin.
+Pick monthly or annual on the plugin's admin banner and click **Start 14-day free trial** (card required, nothing charged until day 15, cancel any time), or choose lifetime — checkout opens in a new tab and the key installs itself within a minute. You can also buy at https://elite.charity/licence/buy/vendure-plugin-fraud-prevention and paste the emailed key into the admin.
