@@ -89,6 +89,19 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
         </vdr-page-block>
 
         <!-- Licence + update banners -->
+        <vdr-page-block *ngIf="meta && meta.licensed">
+            <div class="update-banner" style="margin-top:8px">
+                <div><strong>✅ Licensed</strong> — {{ licenceLabel() }}</div>
+                <div class="actions eval-actions">
+                    <ng-container *ngIf="meta.licence && !meta.licence.master && meta.licence.plan !== 'lifetime'">
+                        <button class="gbtn gbtn-outline gbtn-sm" (click)="openPortal()" [disabled]="portalOpening">{{ portalOpening ? 'Opening…' : 'Manage billing ↗' }}</button>
+                        <button class="gbtn gbtn-primary gbtn-sm" (click)="buyLifetime()" [disabled]="buying">{{ buying ? 'Opening checkout…' : 'Upgrade to lifetime →' }}</button>
+                    </ng-container>
+                    <span *ngIf="claim?.state === 'pending'" style="font-size:12.5px;font-weight:600">⏳ Waiting for checkout to finish — the licence installs itself. <a (click)="checkClaim(true)" style="cursor:pointer;text-decoration:underline">Check now</a></span>
+                    <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-outline gbtn-sm">Details ↗</a>
+                </div>
+            </div>
+        </vdr-page-block>
         <vdr-page-block *ngIf="meta && !meta.licensed">
             <div class="update-banner major" *ngIf="meta.tier === 'trial'">
                 <div>
@@ -1538,6 +1551,27 @@ export class FraudPreventionComponent implements OnInit {
     private startClaimPoll() { this.stopClaimPoll(); this.claimTimer = setInterval(() => this.checkClaim(false), 15000); }
     private stopClaimPoll() { if (this.claimTimer) { clearInterval(this.claimTimer); this.claimTimer = null; } }
     ngOnDestroy() { this.stopClaimPoll(); }
+
+    portalOpening = false;
+    licenceLabel(): string {
+        const l: any = this.meta?.licence;
+        if (!l) return 'active licence';
+        const d = (s: string) => new Date(s).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+        if (l.master) return 'master licence — covers every HULO plugin on this server';
+        if (l.plan === 'lifetime') return 'lifetime licence — never expires, every update included';
+        if (l.trialEndsAt && new Date(l.trialEndsAt).getTime() > Date.now()) {
+            return `free trial on the ${l.plan} plan — first charge on ${d(l.trialEndsAt)}; cancel any time before then via Manage billing`;
+        }
+        return `${l.plan} subscription — renews automatically${l.expiresAt ? ' (current key valid until ' + d(l.expiresAt) + ')' : ''}`;
+    }
+    openPortal() {
+        this.portalOpening = true;
+        this.http.post<any>('/fraud-prevention/licence/portal-link', {}).subscribe({
+            next: r => { this.portalOpening = false; if (r?.url) window.open(r.url, '_blank', 'noopener'); this.cdr.markForCheck(); },
+            error: e => { this.portalOpening = false; this.notification.error(e?.error?.message || 'Could not open the billing portal'); this.cdr.markForCheck(); },
+        });
+    }
+    buyLifetime() { this.buyPlan = 'lifetime'; this.buyLicence(); }
 
     activateLicence() {
         const key = (this.licenceKeyInput || '').trim();
