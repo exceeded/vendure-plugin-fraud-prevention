@@ -107,6 +107,53 @@ export class FraudPreventionController {
         return res.json({ licensed: false });
     }
 
+    /** Buy-from-admin: mint a claim token and return the HULO buy-page
+     *  URL. Once checkout completes the licence server binds the claim to
+     *  the minted key and `licence/claim-status` installs it — no email
+     *  round-trip, no .env edit, no restart. */
+    @Post('licence/purchase-link')
+    async licencePurchaseLink(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        const plan = (['monthly', 'annual', 'lifetime'].includes(String(body?.plan)) ? String(body.plan) : 'annual') as 'monthly' | 'annual' | 'lifetime';
+        try {
+            const r = await this.purchaseClaimClient().createPurchaseLink(plan, String(body?.email || '').trim() || undefined);
+            return res.json({ url: r.url, state: 'pending' });
+        } catch (e: any) {
+            return res.status(500).json({ message: e?.message || 'Could not start the purchase — try again shortly.' });
+        }
+    }
+
+    /** Poll target for the admin page while a purchase is pending; with
+     *  `?check=1` it asks the licence server right now and installs the
+     *  key if it is ready. Installed claims are re-checked daily so a
+     *  renewed subscription key lands automatically too. */
+    @Get('licence/claim-status')
+    async licenceClaimStatus(@Ctx() ctx: RequestContext, @Res() res: Response, @Query('check') check?: string) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        const client = this.purchaseClaimClient();
+        const st = check ? await client.checkNow() : await client.status();
+        return res.json({ ...st, licensed: FraudPreventionPlugin.isLicensed() });
+    }
+
+    /** Buy-from-admin auto-install client (hooks live here so the service
+     *  never has to import the plugin class). */
+    private purchaseClaimClient() {
+        return this.service.initPurchaseClaim({
+            packageName: FraudPreventionPlugin.getPackageName(),
+            instanceId: () => FraudPreventionPlugin.getEvalInstanceId(),
+            onLicence: async (key: string) => {
+                const status = FraudPreventionPlugin.activateRuntimeLicence(key);
+                if (!status.valid) return false;
+                await this.service.saveStoredLicenceKey(key);
+                return true;
+            },
+        });
+    }
+
+    async onApplicationBootstrap() {
+        await this.purchaseClaimClient().resume().catch(() => undefined);
+    }
+
     /** Admin opt-in: "email me before my evaluation ends". Proxied
      *  server-to-server to the HULO licence server, which sends a
      *  welcome email and runs the reminder drip. Explicit consent only. */

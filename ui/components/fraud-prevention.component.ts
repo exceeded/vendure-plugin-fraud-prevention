@@ -105,7 +105,10 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                         <button class="gbtn gbtn-outline gbtn-sm" (click)="sendRemindMe()" [disabled]="remindMeSending || !remindEmail">{{ remindMeSending ? 'Saving…' : 'Email me before it ends' }}</button>
                     </ng-container>
                     <span *ngIf="remindMeSent" class="eval-ok">✓ We'll email you before it ends</span>
-                    <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-primary gbtn-sm">Keep it — get a licence ↗</a>
+                    <select [(ngModel)]="buyPlan" [disabled]="buying" style="padding:5px 9px;border:1px solid #d1d5db;border-radius:7px;font-size:12.5px;background:#fff;color:inherit"><option value="monthly">Monthly</option><option value="annual">Annual (2 months free)</option><option value="lifetime">Lifetime</option></select>
+                    <button class="gbtn gbtn-primary gbtn-sm" (click)="buyLicence()" [disabled]="buying">{{ buying ? 'Opening checkout…' : 'Buy licence →' }}</button>
+                    <span *ngIf="claim?.state === 'pending'" style="font-size:12.5px;font-weight:600">⏳ Waiting for checkout to finish — the licence installs itself. <a (click)="checkClaim(true)" style="cursor:pointer;text-decoration:underline">Check now</a></span>
+                    <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-outline gbtn-sm">Details ↗</a>
                 </div>
             </div>
             <div class="update-banner major" *ngIf="meta.tier !== 'trial'">
@@ -114,7 +117,10 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     review-queue holds, threat-feed sync and email alerts need a licence. Your rules are saved and reactivate instantly with a key.
                 </div>
                 <div class="actions">
-                    <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-primary gbtn-sm">Get a licence ↗</a>
+                    <select [(ngModel)]="buyPlan" [disabled]="buying" style="padding:5px 9px;border:1px solid #d1d5db;border-radius:7px;font-size:12.5px;background:#fff;color:inherit"><option value="monthly">Monthly</option><option value="annual">Annual (2 months free)</option><option value="lifetime">Lifetime</option></select>
+                    <button class="gbtn gbtn-primary gbtn-sm" (click)="buyLicence()" [disabled]="buying">{{ buying ? 'Opening checkout…' : 'Buy licence →' }}</button>
+                    <span *ngIf="claim?.state === 'pending'" style="font-size:12.5px;font-weight:600">⏳ Waiting for checkout to finish — the licence installs itself. <a (click)="checkClaim(true)" style="cursor:pointer;text-decoration:underline">Check now</a></span>
+                    <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-outline gbtn-sm">Details ↗</a>
                 </div>
             </div>
             <div class="update-banner" style="margin-top:8px">
@@ -1474,6 +1480,7 @@ export class FraudPreventionComponent implements OnInit {
     }
 
     ngOnInit() {
+        this.checkClaim(false);
         this.reloadAll();
         this.http.get<any>('/fraud-prevention/meta').subscribe({
             next: m => { this.meta = m; this.premiumLocked = !!m && m.tier === 'free'; this.cdr.markForCheck(); },
@@ -1490,6 +1497,47 @@ export class FraudPreventionComponent implements OnInit {
             error: () => { this.remindMeSending = false; this.notification.error('Could not save the reminder — try again shortly'); this.cdr.markForCheck(); },
         });
     }
+
+    // Buy-from-admin: opens HULO checkout in a new tab; the licence server
+    // binds the purchase to this install and the key installs itself.
+    buyPlan: 'monthly' | 'annual' | 'lifetime' = 'annual';
+    buying = false;
+    claim: any = null;
+    private claimTimer: any = null;
+    buyLicence() {
+        this.buying = true;
+        this.http.post<any>('/fraud-prevention/licence/purchase-link', { plan: this.buyPlan }).subscribe({
+            next: r => {
+                this.buying = false;
+                if (r?.url) {
+                    window.open(r.url, '_blank', 'noopener');
+                    this.claim = { state: 'pending' };
+                    this.startClaimPoll();
+                }
+                this.cdr.markForCheck();
+            },
+            error: e => { this.buying = false; this.notification.error(e?.error?.message || 'Could not start checkout — try again shortly'); this.cdr.markForCheck(); },
+        });
+    }
+    checkClaim(force = false) {
+        this.http.get<any>('/fraud-prevention/licence/claim-status' + (force ? '?check=1' : '')).subscribe({
+            next: r => {
+                const wasPending = this.claim?.state === 'pending';
+                this.claim = r;
+                if (r?.state === 'pending') { if (!this.claimTimer) this.startClaimPoll(); }
+                else this.stopClaimPoll();
+                if (r?.licensed && (wasPending || r?.state === 'installed') && !this.meta?.licensed) {
+                    this.notification.success('Licence installed — all features enabled');
+                    this.http.get<any>('/fraud-prevention/meta').subscribe({ next: m => { this.meta = m; this.premiumLocked = !!m && m.tier === 'free'; this.cdr.markForCheck(); }, error: () => undefined });
+                }
+                this.cdr.markForCheck();
+            },
+            error: () => undefined,
+        });
+    }
+    private startClaimPoll() { this.stopClaimPoll(); this.claimTimer = setInterval(() => this.checkClaim(false), 15000); }
+    private stopClaimPoll() { if (this.claimTimer) { clearInterval(this.claimTimer); this.claimTimer = null; } }
+    ngOnDestroy() { this.stopClaimPoll(); }
 
     activateLicence() {
         const key = (this.licenceKeyInput || '').trim();

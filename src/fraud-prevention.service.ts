@@ -1,4 +1,4 @@
-import { LicenceStore, adapterFor } from '@huloglobal/vendure-licence-sdk';
+import { LicenceStore, adapterFor, PurchaseClaimClient } from '@huloglobal/vendure-licence-sdk';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Logger, TransactionalConnection } from '@vendure/core';
 import * as nodemailer from 'nodemailer';
@@ -64,6 +64,16 @@ export class FraudPreventionService implements OnModuleInit {
     }
 
     private licenceStore = new LicenceStore((sql, params) => this.db.query(sql, params));
+
+    // Buy-from-admin auto-install (hooks are supplied by the controller so
+    // this file never imports the plugin class).
+    private purchaseClaim: PurchaseClaimClient | null = null;
+    initPurchaseClaim(hooks: { packageName: string; instanceId: () => string | null; onLicence: (key: string) => Promise<boolean> }): PurchaseClaimClient {
+        if (!this.purchaseClaim) {
+            this.purchaseClaim = new PurchaseClaimClient({ ...hooks, query: (sql, params, opts) => this.db.query(sql, params, opts) });
+        }
+        return this.purchaseClaim;
+    }
 
     async loadStoredLicenceKey(): Promise<string | null> {
         await this.licenceStore.ensureTable();
