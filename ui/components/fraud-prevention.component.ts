@@ -23,6 +23,7 @@ interface FraudConfig {
     enforce3dSecure: boolean;
     maxFailedPaymentsPerIpPerHour: number;
     cooldownMinutesAfterFailedPayment: number;
+    avsLookup: boolean;
     autoApproveAfterHours: number;
     notifyCustomerOnHold: 'never' | 'block' | 'always';
     reviewHours: number;
@@ -423,7 +424,9 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                             <label class="check-label"><input type="checkbox" [(ngModel)]="current.blockDisposableEmails" (ngModelChange)="markDirty()"> Penalise disposable email domains</label>
                             <label class="check-label"><input type="checkbox" [(ngModel)]="current.enforce3dSecure" (ngModelChange)="markDirty()"> Require 3-D Secure on card payments</label>
                             <label class="check-label"><input type="checkbox" [(ngModel)]="current.blockHighRiskCountries" (ngModelChange)="markDirty()"> Penalise high-risk countries</label>
+                            <label class="check-label"><input type="checkbox" [(ngModel)]="current.avsLookup" (ngModelChange)="markDirty()"> Check card AVS with Stripe <small>(postcode / street mismatch)</small></label>
                         </div>
+                        <p class="hint" style="margin-top:6px">AVS is the card issuer's own verdict on the billing address. Orders paid through Stripe are looked up automatically; other gateways can pass the result in payment metadata or an <code>avsResolver</code>. A typed billing / shipping postcode difference is scored separately as a weak signal.</p>
                         <div class="form-row" *ngIf="current.blockHighRiskCountries" style="margin-top:10px">
                             <label>High-risk country codes <small>(comma-separated ISO codes)</small></label>
                             <input class="form-input" [(ngModel)]="current.highRiskCountries" (ngModelChange)="markDirty()" placeholder="NG, PK, VN">
@@ -633,6 +636,16 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                             <div><label>IP address</label><input class="form-input mono" [(ngModel)]="sim.ip" placeholder="203.0.113.42"></div>
                             <div><label>Order value <small>(£)</small></label><input class="form-input" type="number" min="0" [(ngModel)]="sim.valueGbp"></div>
                             <div><label>Country <small>(optional)</small></label><input class="form-input" [(ngModel)]="sim.country" placeholder="GB" maxlength="2" style="text-transform:uppercase"></div>
+                            <div><label>Billing postcode <small>(optional)</small></label><input class="form-input" [(ngModel)]="sim.billingPostcode" placeholder="SW1A 1AA"></div>
+                            <div><label>Shipping postcode <small>(optional)</small></label><input class="form-input" [(ngModel)]="sim.shippingPostcode" placeholder="SW1A 1AA"></div>
+                            <div><label>Card AVS: postcode <small>(issuer result)</small></label>
+                                <select class="form-input" [(ngModel)]="sim.avsPostalCode">
+                                    <option value="">Not checked</option><option value="pass">Pass</option><option value="fail">Fail</option><option value="unavailable">Unavailable</option>
+                                </select></div>
+                            <div><label>Card AVS: street address <small>(issuer result)</small></label>
+                                <select class="form-input" [(ngModel)]="sim.avsLine1">
+                                    <option value="">Not checked</option><option value="pass">Pass</option><option value="fail">Fail</option><option value="unavailable">Unavailable</option>
+                                </select></div>
                         </div>
                         <label class="check-label" style="margin-bottom:12px"><input type="checkbox" [(ngModel)]="sim.newCustomer"> Treat as first-time customer</label>
                         <div>
@@ -1424,7 +1437,7 @@ export class FraudPreventionComponent implements OnInit {
     newBl = { type: 'email', value: '', note: '' };
     syncBusy = false;
 
-    sim = { email: '', ip: '', valueGbp: 100, country: '', newCustomer: false };
+    sim = { email: '', ip: '', valueGbp: 100, country: '', newCustomer: false, billingPostcode: '', shippingPostcode: '', avsPostalCode: '', avsLine1: '' };
     simResult: any = null;
     simBusy = false;
 
@@ -1918,6 +1931,10 @@ export class FraudPreventionComponent implements OnInit {
             ip: this.sim.ip || undefined,
             orderValuePence: Math.round((this.sim.valueGbp || 0) * 100),
             countryCode: this.sim.country || undefined,
+            billingPostalCode: this.sim.billingPostcode || undefined,
+            shippingPostalCode: this.sim.shippingPostcode || undefined,
+            avsPostalCode: this.sim.avsPostalCode || undefined,
+            avsLine1: this.sim.avsLine1 || undefined,
             isReturningCustomer: this.sim.newCustomer ? false : undefined,
         }).subscribe({
             next: r => { this.simBusy = false; this.simResult = r; this.cdr.markForCheck(); },

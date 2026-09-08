@@ -1,6 +1,6 @@
 import { LicenceStore, adapterFor, PurchaseClaimClient } from '@huloglobal/vendure-licence-sdk';
 import { Injectable, OnModuleInit } from '@nestjs/common';
-import { Logger, TransactionalConnection } from '@vendure/core';
+import { Logger, Order, Payment, PaymentMethod, RequestContext, TransactionalConnection } from '@vendure/core';
 import * as nodemailer from 'nodemailer';
 import * as https from 'https';
 import * as http from 'http';
@@ -17,6 +17,7 @@ import {
 } from './types';
 import { BUILTIN_DISPOSABLE_DOMAINS, FRAUD_SOURCES } from './fraud-sources';
 import { ipInCidr, normalizeEmail } from './net-util';
+import { AvsResult, avsFromMetadata, describeAvs, fetchStripeAvs, postcodesDiffer } from './avs';
 import { domainHasMx, lookupIpIntel, looksGibberish, IpIntel } from './ip-intel';
 import { DEFAULT_TEMPLATES, MessageKind, renderTemplate, renderBody } from './templates';
 import { fanOutOpsEvent, OpsEvent } from './ops-notify';
@@ -30,6 +31,11 @@ export interface AssessInput {
     orderValuePence: number;
     countryCode?: string;
     shippingCountryCode?: string;
+    /** Typed billing / shipping postcodes — compared when both present. */
+    billingPostalCode?: string;
+    shippingPostalCode?: string;
+    /** Card AVS verdicts from the gateway (see resolveAvsForOrder). */
+    avs?: AvsResult | null;
     orderId?: number;
     orderCode?: string;
     /** True when this customer has at least one prior settled order. */
@@ -127,6 +133,7 @@ export class FraudPreventionService implements OnModuleInit {
             `ALTER TABLE fraud_config ADD COLUMN IF NOT EXISTS blockThreshold INT DEFAULT 70`,
             `ALTER TABLE fraud_config ADD COLUMN IF NOT EXISTS holdFulfilment TINYINT DEFAULT 1`,
             `ALTER TABLE fraud_config ADD COLUMN IF NOT EXISTS signalWeights TEXT`,
+            `ALTER TABLE fraud_config ADD COLUMN IF NOT EXISTS avsLookup TINYINT DEFAULT 1`,
         ];
         for (const sql of alters) await this.db.query(sql);
 
@@ -264,6 +271,7 @@ export class FraudPreventionService implements OnModuleInit {
             enforce3dSecure: !!row.enforce3dSecure,
             maxFailedPaymentsPerIpPerHour: row.maxFailedPaymentsPerIpPerHour ?? DEFAULT_CONFIG.maxFailedPaymentsPerIpPerHour,
             cooldownMinutesAfterFailedPayment: row.cooldownMinutesAfterFailedPayment ?? DEFAULT_CONFIG.cooldownMinutesAfterFailedPayment,
+            avsLookup: row.avsLookup == null ? true : !!row.avsLookup,
             autoApproveAfterHours: row.autoApproveAfterHours ?? 0,
             notifyCustomerOnHold: (['never', 'block', 'always'].includes(row.notifyCustomerOnHold) ? row.notifyCustomerOnHold : 'block'),
             reviewHours: row.reviewHours ?? 24,
@@ -295,8 +303,8 @@ export class FraudPreventionService implements OnModuleInit {
                 maxOrdersPerIpPerHour, maxOrdersPerIpPerDay, maxOrdersPerEmailPerDay, maxDailyValuePerEmailPence,
                 maxOrderValuePence, requireEmailVerificationAbovePence, blockDisposableEmails, blockVpnProxy,
                 blockHighRiskCountries, highRiskCountries, enforce3dSecure, maxFailedPaymentsPerIpPerHour,
-                cooldownMinutesAfterFailedPayment, autoApproveAfterHours, notifyCustomerOnHold, reviewHours, signalWeights)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cooldownMinutesAfterFailedPayment, autoApproveAfterHours, notifyCustomerOnHold, reviewHours, signalWeights, avsLookup)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
                 enabled=VALUES(enabled), mode=VALUES(mode), reviewThreshold=VALUES(reviewThreshold),
                 blockThreshold=VALUES(blockThreshold), holdFulfilment=VALUES(holdFulfilment),
@@ -308,7 +316,7 @@ export class FraudPreventionService implements OnModuleInit {
                 enforce3dSecure=VALUES(enforce3dSecure), maxFailedPaymentsPerIpPerHour=VALUES(maxFailedPaymentsPerIpPerHour),
                 cooldownMinutesAfterFailedPayment=VALUES(cooldownMinutesAfterFailedPayment),
                 autoApproveAfterHours=VALUES(autoApproveAfterHours), notifyCustomerOnHold=VALUES(notifyCustomerOnHold),
-                reviewHours=VALUES(reviewHours), signalWeights=VALUES(signalWeights)`,
+                reviewHours=VALUES(reviewHours), signalWeights=VALUES(signalWeights), avsLookup=VALUES(avsLookup)`,
             [
                 c.channelId, c.enabled ? 1 : 0, c.mode, c.reviewThreshold, c.blockThreshold, c.holdFulfilment ? 1 : 0,
                 c.maxOrdersPerIpPerHour, c.maxOrdersPerIpPerDay, c.maxOrdersPerEmailPerDay, c.maxDailyValuePerEmailPence,
@@ -317,6 +325,7 @@ export class FraudPreventionService implements OnModuleInit {
                 c.enforce3dSecure ? 1 : 0, c.maxFailedPaymentsPerIpPerHour, c.cooldownMinutesAfterFailedPayment,
                 c.autoApproveAfterHours || 0, (c as any).notifyCustomerOnHold || 'block',
                 (c as any).reviewHours || 24, JSON.stringify(c.signalWeights || {}),
+                c.avsLookup === false ? 0 : 1,
             ],
             { conflictColumns: ['channelId'] },
         );
@@ -495,6 +504,26 @@ export class FraudPreventionService implements OnModuleInit {
                 `${input.countryCode.toUpperCase()} vs ${input.shippingCountryCode.toUpperCase()}`);
         }
 
+        // 5f. Billing vs shipping postcode (same country, both typed,
+        //     different). Weak alone — gifts, offices — but it compounds.
+        const sameCountry = !input.countryCode || !input.shippingCountryCode
+            || input.countryCode.toUpperCase() === input.shippingCountryCode.toUpperCase();
+        if (sameCountry && postcodesDiffer(input.billingPostalCode, input.shippingPostalCode)) {
+            push('postcode_mismatch', 'Billing / shipping postcode differ',
+                `${String(input.billingPostalCode).trim().toUpperCase()} vs ${String(input.shippingPostalCode).trim().toUpperCase()}`);
+        }
+
+        // 5g. Card AVS — the issuer's own verdict on the billing address.
+        //     Only an explicit FAIL scores; unavailable/unchecked is silent.
+        if (input.avs) {
+            if (input.avs.postalCode === 'fail') {
+                push('avs_postcode_fail', 'Card AVS: postcode mismatch', describeAvs('postalCode', input.avs));
+            }
+            if (input.avs.line1 === 'fail') {
+                push('avs_address_fail', 'Card AVS: street address mismatch', describeAvs('line1', input.avs));
+            }
+        }
+
         // 6. Order value.
         if (input.orderValuePence > cfg.maxOrderValuePence) {
             push('order_value', 'High order value',
@@ -572,6 +601,64 @@ export class FraudPreventionService implements OnModuleInit {
         }
 
         return { score, level, signals, allowlisted: false, action, mode: effectiveMode, protectionActive: !protectionOff };
+    }
+
+    /**
+     * Work out the card AVS verdict for a placed order. Order of trust:
+     *   1. host `avsResolver` option (any gateway),
+     *   2. `Payment.metadata` on a settled/authorised payment,
+     *   3. Stripe: fetch the PaymentIntent (expand latest_charge) with the
+     *      payment method's own API key — only when the channel's
+     *      `avsLookup` is on.
+     * Never throws; unknown → null → no signal.
+     */
+    async resolveAvsForOrder(ctx: RequestContext, order: Order, cfg?: FraudChannelConfig): Promise<AvsResult | null> {
+        try {
+            let payments: Payment[] = Array.isArray(order.payments) && order.payments.length ? order.payments : [];
+            if (!payments.length) {
+                payments = await this.connection.getRepository(ctx, Payment).find({
+                    where: { order: { id: order.id } as any },
+                    order: { createdAt: 'DESC' } as any,
+                }).catch(() => [] as Payment[]);
+            }
+            const live = payments.filter(p => ['Settled', 'Authorized'].includes(p.state));
+            const candidates = live.length ? live : payments;
+
+            if (this.options.avsResolver) {
+                try {
+                    const r = await this.options.avsResolver({ ...order, payments: candidates } as any, ctx);
+                    if (r && (r.postalCode || r.line1)) return r;
+                } catch (e: any) {
+                    Logger.warn(`avsResolver threw for ${order.code}: ${e.message}`, loggerCtx);
+                }
+            }
+
+            for (const p of candidates) {
+                const fromMeta = avsFromMetadata(p.metadata);
+                if (fromMeta) return fromMeta;
+            }
+
+            const lookup = cfg ? cfg.avsLookup !== false : (await this.getConfig(Number(ctx.channelId || 1))).avsLookup !== false;
+            if (!lookup) return null;
+            for (const p of candidates) {
+                const piId = p.transactionId || (p.metadata as any)?.paymentIntentId;
+                if (!piId || !/^pi_/.test(String(piId))) continue;
+                const method = await this.connection.getRepository(ctx, PaymentMethod)
+                    .findOne({ where: { code: p.method } })
+                    .catch(() => null);
+                if (!method || method.handler?.code !== 'stripe') continue;
+                const apiKey = method.handler.args?.find(a => a.name === 'apiKey')?.value;
+                if (!apiKey) continue;
+                const r = await fetchStripeAvs(String(apiKey), String(piId), {
+                    log: msg => Logger.warn(`AVS lookup for ${order.code}: ${msg}`, loggerCtx),
+                });
+                if (r) return r;
+                Logger.verbose(`No AVS checks on ${piId} for ${order.code} (non-card payment, or the storefront did not send the billing address to Stripe)`, loggerCtx);
+            }
+        } catch (e: any) {
+            Logger.warn(`AVS resolution failed for ${order.code}: ${e.message}`, loggerCtx);
+        }
+        return null;
     }
 
     private async isAllowlisted(email?: string, domain?: string, ip?: string): Promise<boolean> {

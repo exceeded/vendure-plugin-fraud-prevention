@@ -302,10 +302,16 @@ export class FraudPreventionController {
             orderValuePence: Number(body.orderValuePence || 0),
             countryCode: body.countryCode || undefined,
             shippingCountryCode: body.shippingCountryCode || undefined,
+            billingPostalCode: body.billingPostalCode || undefined,
+            shippingPostalCode: body.shippingPostalCode || undefined,
+            avs: (body.avsPostalCode || body.avsLine1)
+                ? { postalCode: body.avsPostalCode || undefined, line1: body.avsLine1 || undefined, source: 'simulated' }
+                : undefined,
             isReturningCustomer: body.isReturningCustomer,
             dryRun: true,
         });
-        return res.json(assessment);
+        // A dry run is a read — explicit 200 rather than Nest's POST default 201.
+        return res.status(200).json(assessment);
     }
 
     // ── Admin: customer dossier (Lookup tab) ───────────────────────────

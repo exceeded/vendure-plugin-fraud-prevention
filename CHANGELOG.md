@@ -5,6 +5,20 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] — 2026-09-08
+
+### Added
+- **Postcode / AVS mismatch signals.** Three new weighted signals: `avs_postcode_fail` (35) and `avs_address_fail` (20) fire when the card issuer's AVS verdict on the billing postcode / street address is an explicit *fail*; `postcode_mismatch` (8) fires when the typed billing and shipping postcodes differ within the same country. AVS verdicts come from a host `avsResolver` option (any gateway), from `Payment.metadata` (`avs: { postalCode, line1 }`, Stripe-style `checks`, or flat keys), or — for orders paid through Vendure's `StripePlugin` — automatically, by fetching the PaymentIntent's latest charge with the payment method's own API key. Fails open; `unavailable` / `unchecked` never score.
+- **Rules → Signals:** *Check card AVS with Stripe* toggle per channel (`avsLookup`, default on).
+- **Simulate:** billing / shipping postcode and card AVS postcode / street result inputs, so the new signals can be tried against live data.
+- Exports: `AvsCheck`, `AvsResult`, `avsFromMetadata`, `avsFromStripeCharge`, `fetchStripeAvs`, `normalisePostcode`, `parseAvsCheck`, `postcodesDiffer`.
+
+### Notes
+- Stripe only runs AVS when the checkout sends the billing address with the payment. The Payment Element does not collect a street address (and often no postcode) by itself, so pass the order's address in `confirmPayment` → `confirmParams.payment_method_data.billing_details` — see README → Postcode / AVS. Wallet payments (Apple Pay, Google Pay, Link) carry no AVS checks.
+
+### Changed
+- `AssessInput` gains `billingPostalCode`, `shippingPostalCode` and `avs`; the order guard fills them from the order's addresses and `FraudPreventionService.resolveAvsForOrder()`.
+
 ## [0.17.1] — 2026-09-02
 
 ### Changed

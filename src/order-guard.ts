@@ -49,6 +49,10 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
             orderValuePence: order.subTotalWithTax || 0,
             countryCode: order.billingAddress?.countryCode || order.shippingAddress?.countryCode || undefined,
             shippingCountryCode: order.shippingAddress?.countryCode || undefined,
+            billingPostalCode: order.billingAddress?.postalCode || undefined,
+            shippingPostalCode: order.shippingAddress?.postalCode || undefined,
+            // Card AVS verdict — host resolver, payment metadata, or Stripe.
+            avs: await this.service.resolveAvsForOrder(event.ctx, order),
             orderId: Number(order.id),
             orderCode: order.code,
             // customer history is computed inside the service by canonical

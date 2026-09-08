@@ -20,15 +20,60 @@ Each fired signal adds weighted points (all weights overridable per channel):
 | Failed payments from IP (1h) | 45 |
 | IP order velocity (hour / day) | 40 / 30 |
 | High-risk country | 40 |
+| Card AVS: postcode mismatch (issuer verdict) | 35 |
 | Email order velocity (24h) | 35 |
 | Email daily value ceiling | 30 |
 | Order value ceiling | 25 |
+| Card AVS: street address mismatch (issuer verdict) | 20 |
 | First order + high value | 18 |
 | Plus-addressed email (`x+7@gmail`) | 12 |
+| Billing / shipping postcode differ (typed) | 8 |
 
 Emails are canonicalised before velocity counting — `x+1@gmail.com`,
 `x+2@gmail.com` and `x.y@gmail.com` all count as one identity. Allowlisted
 identities bypass everything.
+
+### Postcode / AVS
+
+AVS (Address Verification Service) is the card issuer's own verdict on the
+billing postcode and street number the customer typed — the strongest
+address signal there is, because it comes from the bank rather than the
+customer. Only an explicit **fail** scores; `unavailable` / `unchecked`
+(issuer doesn't support it, or the field wasn't sent) is silent.
+
+Where the verdict comes from, in order:
+
+1. **`avsResolver`** plugin option — any gateway. Called once per placed
+   order with the Vendure `Order` (payments loaded) and the request
+   context; return `{ postalCode, line1, source }` using
+   `pass | fail | unavailable | unchecked`, or `null` when unknown.
+2. **Payment metadata** — a custom payment handler can store the result on
+   the `Payment` as `{ avs: { postalCode: 'fail', line1: 'pass' } }`
+   (Stripe-style `checks: { address_postal_code_check, address_line1_check }`
+   and flat keys are recognised too; `Y/N/U`, `match/no_match` and booleans
+   are all understood).
+3. **Stripe, automatically** — for orders paid through Vendure's
+   `StripePlugin` the PaymentIntent is fetched with `expand[]=latest_charge`
+   using the payment method's own API key and
+   `charge.payment_method_details.card.checks` is read. One GET per placed
+   order, 5 s timeout, fails open. Switch it off per channel with
+   *Check card AVS with Stripe* under Rules → Signals.
+
+   **Stripe only runs AVS when your checkout sends the billing address.**
+   The Payment Element does not collect the street address by itself, and
+   many integrations never pass a postcode either — in which case both
+   checks come back `null` and nothing scores. Send the order's billing
+   address in `confirmPayment`
+   (`confirmParams.payment_method_data.billing_details.address`, with the
+   element created using `fields: { billingDetails: { address: 'never' } }`)
+   and the issuer verifies postcode and street number on every card
+   payment. Wallet payments (Apple Pay, Google Pay, Link) are verified by
+   the wallet provider instead and carry no AVS checks.
+
+A typed billing vs shipping postcode difference (same country, both present)
+is scored separately and weakly — gifts and office deliveries do this
+legitimately, but it compounds with the other signals. All three weights are
+overridable per channel like every other signal.
 
 ## Enforcement modes (per channel)
 

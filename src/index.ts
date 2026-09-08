@@ -22,3 +22,13 @@ export {
 } from './types';
 export { FRAUD_SOURCES, CUSTOM_FEED_PRESETS } from './fraud-sources';
 export { ipInCidr, ipv4ToInt, normalizeEmail } from './net-util';
+export {
+    AvsCheck,
+    AvsResult,
+    avsFromMetadata,
+    avsFromStripeCharge,
+    fetchStripeAvs,
+    normalisePostcode,
+    parseAvsCheck,
+    postcodesDiffer,
+} from './avs';

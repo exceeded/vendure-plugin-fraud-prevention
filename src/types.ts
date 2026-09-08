@@ -6,6 +6,8 @@
  * the channel's mode decides what actually happens.
  */
 
+import type { AvsResult } from './avs';
+
 export type FraudMode = 'off' | 'monitor' | 'enforce';
 
 export type RiskLevel = 'low' | 'medium' | 'review' | 'blocked';
@@ -61,6 +63,11 @@ export interface FraudChannelConfig {
     // Failed payments
     maxFailedPaymentsPerIpPerHour: number;
     cooldownMinutesAfterFailedPayment: number;
+    /** Fetch card AVS (postcode / street) results from Stripe for orders
+     *  paid through Vendure's StripePlugin. One GET per placed order,
+     *  fails open. Results supplied via payment metadata or a host
+     *  `avsResolver` are used regardless of this flag. */
+    avsLookup: boolean;
     /** Auto-approve pending cases after N hours (0 = never). Weekend
      *  safety valve so held orders don't strand while nobody reviews. */
     autoApproveAfterHours: number;
@@ -99,6 +106,11 @@ export const DEFAULT_WEIGHTS: Record<string, number> = {
     failed_payments: 45,
     plus_addressing: 12,
     new_customer_high_value: 18,
+    // Address verification — the issuer's verdict (AVS) is strong; a
+    // typed billing/shipping postcode difference is weak on its own.
+    avs_postcode_fail: 35,
+    avs_address_fail: 20,
+    postcode_mismatch: 8,
 };
 
 export const DEFAULT_CONFIG: Omit<FraudChannelConfig, 'channelId' | 'channelCode'> = {
@@ -120,6 +132,7 @@ export const DEFAULT_CONFIG: Omit<FraudChannelConfig, 'channelId' | 'channelCode
     enforce3dSecure: true,
     maxFailedPaymentsPerIpPerHour: 3,
     cooldownMinutesAfterFailedPayment: 15,
+    avsLookup: true,
     autoApproveAfterHours: 0,
     notifyCustomerOnHold: 'block',
     reviewHours: 24,
@@ -146,4 +159,9 @@ export interface FraudPreventionPluginOptions {
     logRetentionDays?: number;
     /** Disable the daily threat-feed sync cron (default false). */
     disableFeedSync?: boolean;
+    /** Supply card AVS results for gateways the plugin cannot read itself.
+     *  Called once per placed order with the Vendure Order (payments
+     *  loaded) and the request context; return null when unknown. Takes
+     *  precedence over payment metadata and the built-in Stripe lookup. */
+    avsResolver?: (order: any, ctx: any) => Promise<AvsResult | null | undefined> | AvsResult | null | undefined;
 }

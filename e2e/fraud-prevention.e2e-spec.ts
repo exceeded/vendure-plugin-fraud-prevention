@@ -51,7 +51,7 @@ run('@huloglobal/vendure-plugin-fraud-prevention (MariaDB)', () => {
             FraudPreventionPlugin.init({ publicBaseUrl: BASE, defaultAdminEmail: 'ops@test.local' }),
         ],
     });
-    const { server } = createTestEnvironment(config);
+    const { server, adminClient } = createTestEnvironment(config);
 
     beforeAll(async () => {
         await server.init({ initialData, productsCsvPath: '', customerCount: 0 } as any);
@@ -134,6 +134,70 @@ run('@huloglobal/vendure-plugin-fraud-prevention (MariaDB)', () => {
         const keys = a.signals.map(s => s.key);
         expect(keys).toContain('order_value');
         expect(keys).toContain('new_customer_high_value');
+    });
+
+    it('fires the postcode / AVS signals and stays silent on unavailable / matching', async () => {
+        const hit = await svc().assess({
+            channelId: 1, email: 'avs.fail@example.com', ip: '203.0.113.30', orderValuePence: 2000,
+            countryCode: 'GB', shippingCountryCode: 'GB',
+            billingPostalCode: 'SW1A 1AA', shippingPostalCode: 'EC1A 1BB',
+            avs: { postalCode: 'fail', line1: 'fail', source: 'stripe' }, dryRun: true,
+        });
+        const keys = hit.signals.map(s => s.key);
+        expect(keys).toContain('avs_postcode_fail');
+        expect(keys).toContain('avs_address_fail');
+        expect(keys).toContain('postcode_mismatch');
+        expect(hit.signals.find(s => s.key === 'avs_postcode_fail')!.detail).toMatch(/stripe/);
+        // Exact contribution of the three address signals (other signals,
+        // e.g. IP geo on a TEST-NET address, may fire alongside).
+        const addrPoints = hit.signals.filter(s => ['avs_postcode_fail', 'avs_address_fail', 'postcode_mismatch'].includes(s.key))
+            .reduce((n, s) => n + s.points, 0);
+        expect(addrPoints).toBe(35 + 20 + 8);
+
+        const quiet = await svc().assess({
+            channelId: 1, email: 'avs.ok@example.com', orderValuePence: 2000,
+            countryCode: 'GB', shippingCountryCode: 'GB',
+            billingPostalCode: 'sw1a1aa', shippingPostalCode: 'SW1A 1AA',
+            avs: { postalCode: 'unavailable', line1: 'pass' }, dryRun: true,
+        });
+        expect(quiet.signals.map(s => s.key)).not.toContain('postcode_mismatch');
+        expect(quiet.signals.map(s => s.key)).not.toContain('avs_postcode_fail');
+        expect(quiet.score).toBe(0);
+
+        // Different countries: country_mismatch owns it, postcode stays quiet.
+        const abroad = await svc().assess({
+            channelId: 1, email: 'avs.abroad@example.com', ip: '203.0.113.32', orderValuePence: 2000,
+            countryCode: 'GB', shippingCountryCode: 'FR',
+            billingPostalCode: 'SW1A 1AA', shippingPostalCode: '75001', dryRun: true,
+        });
+        expect(abroad.signals.map(s => s.key)).toContain('country_mismatch');
+        expect(abroad.signals.map(s => s.key)).not.toContain('postcode_mismatch');
+    });
+
+    it('resolveAvsForOrder reads payment metadata and fails open without it', async () => {
+        const ctx = { channelId: 1 } as any;
+        const withMeta = await svc().resolveAvsForOrder(ctx, {
+            id: 999999, code: 'T1', payments: [{ state: 'Settled', method: 'x', metadata: { avs: { postalCode: 'fail' } } }],
+        } as any);
+        expect(withMeta).toEqual({ source: 'payment metadata', postalCode: 'fail' });
+        const without = await svc().resolveAvsForOrder(ctx, {
+            id: 999998, code: 'T2', payments: [{ state: 'Settled', method: 'x', metadata: { paymentIntentId: 'pi_x' } }],
+        } as any);
+        expect(without).toBeNull();
+    });
+
+    it('simulate accepts postcode + AVS inputs (admin)', async () => {
+        await adminClient.asSuperAdmin();
+        const token = (adminClient as any).authToken as string;
+        const res = await fetch(`${BASE}/fraud-prevention/simulate`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ channelId: 1, email: 'sim@example.com', orderValuePence: 1000, avsPostalCode: 'fail' }),
+        });
+        expect(res.status).toBe(200);
+        const a = await res.json();
+        expect(a.signals.map((s: any) => s.key)).toContain('avs_postcode_fail');
+        expect(a.signals.find((s: any) => s.key === 'avs_postcode_fail').detail).toMatch(/simulated/);
     });
 
     it('gives trust credit to a returning customer (negative points, floored at 0)', async () => {
