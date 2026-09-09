@@ -37,7 +37,7 @@ import { CustomDetailComponent, SharedModule } from '@vendure/admin-ui/core';
                 {{ showSignals ? 'Hide' : 'Show' }} {{ data.signals.length }} signal{{ data.signals.length === 1 ? '' : 's' }}
             </button>
             <ul class="signal-list" *ngIf="showSignals">
-                <li *ngFor="let s of data.signals">
+                <li *ngFor="let s of data.signals" [class.avs]="s.key?.startsWith('avs_')">
                     <span class="sig-label">{{ s.label }}</span>
                     <span class="sig-detail">{{ s.detail }}</span>
                     <span class="sig-pts" *ngIf="s.points != null">+{{ s.points }}</span>
@@ -67,6 +67,8 @@ import { CustomDetailComponent, SharedModule } from '@vendure/admin-ui/core';
         .sig-label { font-weight: 600; min-width: 160px; }
         .sig-detail { color: #64748b; flex: 1; }
         .sig-pts { font-weight: 700; color: #b45309; }
+        .signal-list li.avs { background: #fef2f2; border-radius: 6px; padding: 4px 6px; border-bottom-color: #fecaca; }
+        .signal-list li.avs .sig-label { color: #b91c1c; }
         .assessed-at { margin-top: 8px; font-size: 11.5px; color: #94a3b8; }
         .shadow-note { margin: 4px 0 8px; padding: 6px 10px; border-radius: 8px; background: #fffbeb; border: 1px solid #fbbf24; color: #92400e; font-size: 12.5px; }
 
@@ -79,6 +81,8 @@ import { CustomDetailComponent, SharedModule } from '@vendure/admin-ui/core';
         :host-context([data-theme='dark']) .toggle-btn:hover { background: #334155; }
         :host-context([data-theme='dark']) .signal-list li { border-bottom-color: #334155; }
         :host-context([data-theme='dark']) .sig-detail { color: #94a3b8; }
+        :host-context([data-theme='dark']) .signal-list li.avs { background: #3b1111; border-bottom-color: #7f1d1d; }
+        :host-context([data-theme='dark']) .signal-list li.avs .sig-label { color: #fca5a5; }
         :host-context([data-theme='dark']) .shadow-note { background: rgba(251,191,36,.12); border-color: #b45309; color: #fcd34d; }
     `],
 })

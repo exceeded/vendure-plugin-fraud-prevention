@@ -467,7 +467,10 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                     <td>{{ c.email }}<div class="hint mono" *ngIf="c.ip">{{ c.ip }}</div></td>
                                     <td><span class="score-pill" [ngClass]="scoreClass(c.riskScore)">{{ c.riskScore }}</span></td>
                                     <td class="signals-cell">
-                                        <span class="mini-chip" *ngFor="let s of parseSignals(c.signals)" [title]="s.detail">{{ s.label }}</span>
+                                        <span class="mini-chip" *ngFor="let s of parseSignals(c.signals)" [class.avs]="isAvsSignal(s)" [title]="s.detail + (s.points != null ? ' (+' + s.points + ')' : '')">
+                                            <svg *ngIf="isAvsSignal(s)" class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M2 10h20" stroke="currentColor" stroke-width="2"/><path d="M6 15h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                                            {{ s.label }}
+                                        </span>
                                         <span class="hint" *ngIf="!parseSignals(c.signals).length">{{ c.reasons }}</span>
                                     </td>
                                     <td class="hint">{{ c.createdAt | date: 'd MMM HH:mm' }}</td>
@@ -1170,6 +1173,13 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
             display: inline-block;
         }
         .signals-cell { max-width: 260px; }
+        /* Card AVS verdicts come from the issuer, not the customer — make
+           them the first thing a reviewer's eye lands on. */
+        .mini-chip.avs {
+            border-color: var(--gb-line-bad); background: var(--gb-tint-bad); color: var(--gb-strong);
+            font-weight: 700; display: inline-flex; align-items: center; gap: 4px;
+        }
+        .chip-ico { width: 12px; height: 12px; flex: 0 0 auto; }
         .reasons-cell { max-width: 300px; }
 
         /* ── Forms ────────────────────────────────────────────────── */
@@ -1774,11 +1784,17 @@ export class FraudPreventionComponent implements OnInit {
         });
     }
 
-    parseSignals(raw: any): Array<{ label: string; detail: string }> {
+    parseSignals(raw: any): Array<{ key?: string; label: string; detail: string; points?: number }> {
         try {
             const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            return Array.isArray(arr) ? arr : [];
+            if (!Array.isArray(arr)) return [];
+            // Issuer AVS verdicts first, then everything else in scoring order.
+            return [...arr].sort((a, b) => Number(this.isAvsSignal(b)) - Number(this.isAvsSignal(a)));
         } catch { return []; }
+    }
+
+    isAvsSignal(s: { key?: string }): boolean {
+        return typeof s?.key === 'string' && s.key.startsWith('avs_');
     }
 
     scoreClass(score: number): string {

@@ -5,6 +5,11 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.2] — 2026-09-09
+
+### Changed
+- **Review queue & order page:** card AVS verdicts are shown as red card chips, sorted first in each case's signal list, with the points in the tooltip; the order-page fraud panel highlights the same rows. The bank's verdict is the first thing a reviewer sees.
+
 ## [0.18.1] — 2026-09-08
 
 ### Fixed
