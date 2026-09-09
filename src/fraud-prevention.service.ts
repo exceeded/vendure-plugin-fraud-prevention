@@ -748,8 +748,18 @@ export class FraudPreventionService implements OnModuleInit {
         return rows.map((r: any) => Number(r.orderId));
     }
 
-    async listCases(status?: string, take = 100): Promise<any[]> {
-        const where = status ? `WHERE bo.status = ?` : '';
+    /**
+     * Review-queue listing. `signal` narrows to cases where a signal key
+     * with that prefix fired — 'avs' = the card issuer's AVS verdict — by
+     * matching the stored signal JSON, so no schema change is needed.
+     */
+    async listCases(status?: string, signal?: string, take = 100): Promise<any[]> {
+        const clauses: string[] = [];
+        const params: any[] = [];
+        if (status) { clauses.push('bo.status = ?'); params.push(status); }
+        const prefix = (signal || '').replace(/[^a-z0-9_]/gi, '');
+        if (prefix) { clauses.push('bo.signals LIKE ?'); params.push(`%"key":"${prefix}%`); }
+        const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
         return this.db.query(
             `SELECT bo.*, o.code AS liveOrderCode, o.state AS orderState, o.subTotalWithTax,
                     c.firstName, c.lastName, c.emailAddress
@@ -757,7 +767,7 @@ export class FraudPreventionService implements OnModuleInit {
              LEFT JOIN \`order\` o ON o.id = bo.orderId
              LEFT JOIN customer c ON c.id = o.customerId
              ${where} ORDER BY bo.createdAt DESC LIMIT ${Math.min(take, 500)}`,
-            status ? [status] : [],
+            params,
         ).catch(() => []);
     }
 

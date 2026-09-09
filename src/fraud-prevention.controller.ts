@@ -228,9 +228,12 @@ export class FraudPreventionController {
 
     // ── Admin: review queue ────────────────────────────────────────────
     @Get('cases')
-    async cases(@Ctx() ctx: RequestContext, @Res() res: Response, @Query('status') status?: string) {
+    async cases(
+        @Ctx() ctx: RequestContext, @Res() res: Response,
+        @Query('status') status?: string, @Query('signal') signal?: string,
+    ) {
         if (denyUnlessAdmin(ctx, res, false)) return;
-        return res.json(await this.service.listCases(status || undefined));
+        return res.json(await this.service.listCases(status || undefined, signal || undefined));
     }
 
     @Post('cases/:id/approve')

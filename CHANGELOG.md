@@ -5,6 +5,11 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.3] — 2026-09-09
+
+### Added
+- **Review queue AVS filter.** An *AVS fails* toggle next to the status filters narrows the queue to cases where the card issuer reported a postcode or street-address mismatch; it combines with pending / approved / rejected. `GET /fraud-prevention/cases` accepts `signal=avs` (any signal-key prefix).
+
 ## [0.18.2] — 2026-09-09
 
 ### Changed

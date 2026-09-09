@@ -453,8 +453,16 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     <div class="card-block">
                         <div class="row-between">
                             <h3 class="step-title" style="margin:0">Review queue</h3>
-                            <span class="mode-seg">
-                                <button *ngFor="let f of caseFilters" class="seg" [class.active]="caseFilter === f" (click)="caseFilter = f; loadCases()">{{ f || 'all' }}</button>
+                            <span class="seg-row">
+                                <span class="mode-seg">
+                                    <button *ngFor="let f of caseFilters" class="seg" [class.active]="caseFilter === f" (click)="caseFilter = f; loadCases()">{{ f || 'all' }}</button>
+                                </span>
+                                <span class="mode-seg" title="Only cases where the card issuer reported an AVS postcode or street-address mismatch">
+                                    <button class="seg seg-avs" [class.active]="caseSignal === 'avs'" (click)="caseSignal = caseSignal === 'avs' ? '' : 'avs'; loadCases()">
+                                        <svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M2 10h20" stroke="currentColor" stroke-width="2"/><path d="M6 15h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                                        AVS fails
+                                    </button>
+                                </span>
                             </span>
                         </div>
                         <p class="hint">Approve releases held licence keys; reject cancels the order. The <em>email customer</em> tick controls whether they hear about it — untick to resolve silently. <em>Blocklist</em> (with reject) quietly bans the email + IP so a fraudster learns nothing and still can't come back.</p>
@@ -494,7 +502,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                 </tr>
                             </tbody>
                         </table>
-                        <ng-template #noCases><p class="hint">No {{ caseFilter || '' }} cases. When enforce mode holds an order it appears here.</p></ng-template>
+                        <ng-template #noCases><p class="hint">No {{ caseFilter || '' }} cases{{ caseSignal === 'avs' ? ' with a card AVS mismatch' : '' }}. When enforce mode holds an order it appears here.</p></ng-template>
                     </div>
                 </div>
             </vdr-page-block>
@@ -1180,6 +1188,9 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
             font-weight: 700; display: inline-flex; align-items: center; gap: 4px;
         }
         .chip-ico { width: 12px; height: 12px; flex: 0 0 auto; }
+        .seg-row { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .seg.seg-avs { display: inline-flex; align-items: center; gap: 5px; }
+        .seg.seg-avs.active { border-color: var(--gb-line-bad); background: var(--gb-tint-bad); color: var(--gb-strong); }
         .reasons-cell { max-width: 300px; }
 
         /* ── Forms ────────────────────────────────────────────────── */
@@ -1428,6 +1439,8 @@ export class FraudPreventionComponent implements OnInit {
     cases: any[] = [];
     caseFilters = ['pending', 'approved', 'rejected', ''];
     caseFilter = 'pending';
+    /** '' = every signal, 'avs' = only cases with an issuer AVS fail. */
+    caseSignal = '';
     caseNotes: Record<number, string> = {};
     caseNotifyOverride: Record<number, boolean> = {};
     caseBlocklist: Record<number, boolean> = {};
@@ -1730,7 +1743,10 @@ export class FraudPreventionComponent implements OnInit {
     // ── Review queue ───────────────────────────────────────────────
     loadCases() {
         const run = () => {
-            const q = this.caseFilter ? `?status=${this.caseFilter}` : '';
+            const params = new URLSearchParams();
+            if (this.caseFilter) params.set('status', this.caseFilter);
+            if (this.caseSignal) params.set('signal', this.caseSignal);
+            const q = params.toString() ? `?${params.toString()}` : '';
             this.http.get<any[]>(`/fraud-prevention/cases${q}`).subscribe({
                 next: rows => {
                     this.cases = rows;
@@ -1742,7 +1758,7 @@ export class FraudPreventionComponent implements OnInit {
                         if (this.caseNotifyOverride[c.id] === undefined) this.caseNotifyOverride[c.id] = notifyDefault;
                         if (this.caseBlocklist[c.id] === undefined) this.caseBlocklist[c.id] = blockDefault;
                     }
-                    if (this.caseFilter === 'pending') this.pendingCount = rows.length;
+                    if (this.caseFilter === 'pending' && !this.caseSignal) this.pendingCount = rows.length;
                     this.cdr.markForCheck();
                 },
                 error: () => undefined,

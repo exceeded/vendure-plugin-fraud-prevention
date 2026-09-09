@@ -212,6 +212,21 @@ run('@huloglobal/vendure-plugin-fraud-prevention (MariaDB)', () => {
         expect(a.signals.find((s: any) => s.key === 'avs_postcode_fail').detail).toMatch(/simulated/);
     });
 
+    it('review-queue listing can be narrowed to cases with an AVS fail', async () => {
+        const input = { channelId: 1, email: 'avs.case@example.com', ip: '203.0.113.40', orderValuePence: 2000, orderId: 424242, orderCode: 'AVSCASE' };
+        const withAvs = await svc().assess({ ...input, avs: { postalCode: 'fail', source: 'test' }, dryRun: true });
+        const idA = await svc().createCase(input as any, withAvs);
+        const plain = await svc().assess({ ...input, email: 'plain.case@example.com', orderId: 424243, orderCode: 'PLAINCASE', dryRun: true });
+        const idB = await svc().createCase({ ...input, email: 'plain.case@example.com', orderId: 424243, orderCode: 'PLAINCASE' } as any, { ...plain, level: 'review', action: 'review' });
+        const all = await svc().listCases(undefined);
+        expect(all.map((c: any) => c.id)).toEqual(expect.arrayContaining([idA, idB]));
+        const avsOnly = await svc().listCases(undefined, 'avs');
+        expect(avsOnly.map((c: any) => c.id)).toContain(idA);
+        expect(avsOnly.map((c: any) => c.id)).not.toContain(idB);
+        expect((await svc().listCases('pending', 'avs')).map((c: any) => c.id)).toContain(idA);
+        expect(await svc().listCases(undefined, "avs' OR 1=1 --")).toEqual([]);
+    });
+
     it('gives trust credit to a returning customer (negative points, floored at 0)', async () => {
         const a = await svc().assess({
             channelId: 1, email: 'loyal@example.com', ip: '203.0.113.13',
