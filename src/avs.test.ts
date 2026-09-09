@@ -25,6 +25,13 @@ describe('normalisePostcode / postcodesDiffer', () => {
         expect(postcodesDiffer(undefined, undefined)).toBe(false);
         expect(postcodesDiffer('10115', '10115 ')).toBe(false);
     });
+    it('treats a partial form of the same code as a match (ZIP+4, UK outward code)', () => {
+        expect(postcodesDiffer('90210', '90210-1234')).toBe(false);
+        expect(postcodesDiffer('SW1A', 'SW1A 1AA')).toBe(false);
+        expect(postcodesDiffer('SW1A 1AA', 'SW1A 2BB')).toBe(true);
+        expect(postcodesDiffer('90210', '90211-1234')).toBe(true);
+        expect(postcodesDiffer('S', 'SW1A 1AA')).toBe(true); // too short to be a partial
+    });
 });
 
 describe('parseAvsCheck', () => {
@@ -114,15 +121,8 @@ describe('fetchStripeAvs', () => {
         expect(calls).toHaveLength(1);
         expect(calls[0].url).toBe('https://api.stripe.com/v1/payment_intents/pi_123?expand[]=latest_charge');
         expect(calls[0].init.headers.Authorization).toBe('Bearer sk_test_abc');
+        expect(calls[0].init.headers['Stripe-Version']).toBe('2022-11-15');
         expect(calls[0].init.method).toBe('GET');
-    });
-
-    it('falls back to charges.data on older API versions', async () => {
-        const fetchImpl = async () => okResponse({
-            id: 'pi_1',
-            charges: { data: [{ payment_method_details: { card: { checks: { address_postal_code_check: 'pass' } } } }] },
-        });
-        expect(await fetchStripeAvs('sk', 'pi_1', { fetchImpl })).toEqual({ source: 'stripe', postalCode: 'pass' });
     });
 
     it('fetches the charge by id when latest_charge was not expanded', async () => {

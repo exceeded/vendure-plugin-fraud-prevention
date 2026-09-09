@@ -643,9 +643,15 @@ export class FraudPreventionService implements OnModuleInit {
             for (const p of candidates) {
                 const piId = p.transactionId || (p.metadata as any)?.paymentIntentId;
                 if (!piId || !/^pi_/.test(String(piId))) continue;
-                const method = await this.connection.getRepository(ctx, PaymentMethod)
-                    .findOne({ where: { code: p.method } })
-                    .catch(() => null);
+                // Payment-method codes are per channel: pick the one assigned
+                // to this order's channel so a multi-channel host with two
+                // Stripe accounts uses the right key.
+                const methods = await this.connection.getRepository(ctx, PaymentMethod)
+                    .find({ where: { code: p.method }, relations: ['channels'] })
+                    .catch(() => [] as PaymentMethod[]);
+                const channelId = String(ctx.channelId ?? '');
+                const method = methods.find(m => (m.channels || []).some(ch => String(ch.id) === channelId))
+                    ?? (methods.length === 1 ? methods[0] : undefined);
                 if (!method || method.handler?.code !== 'stripe') continue;
                 const apiKey = method.handler.args?.find(a => a.name === 'apiKey')?.value;
                 if (!apiKey) continue;

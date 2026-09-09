@@ -5,6 +5,13 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] — 2026-09-08
+
+### Fixed
+- **Stripe lookup pinned to API version 2022-11-15.** Without a `Stripe-Version` header the request ran at the account's default version, and on accounts created before November 2022 `expand[]=latest_charge` is rejected with HTTP 400 — the lookup silently produced nothing. The GET is now pinned (read-only, so it never changes the account), and the unreachable `charges.data` fallback is gone.
+- **Multi-channel hosts:** the Stripe payment method is now resolved for the order's channel, so two channels with different Stripe accounts each use their own key.
+- `postcode_mismatch` no longer fires when one postcode is a partial form of the other (5-digit ZIP vs ZIP+4, UK outward code vs full postcode).
+
 ## [0.18.0] — 2026-09-08
 
 ### Added

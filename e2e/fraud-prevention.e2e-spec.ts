@@ -1,4 +1,4 @@
-import { mergeConfig } from '@vendure/core';
+import { mergeConfig, RequestContext } from '@vendure/core';
 import { createTestEnvironment, registerInitializer, MysqlInitializer, testConfig } from '@vendure/testing';
 import { initialData } from '../../../e2e-shared/initial-data';
 import { FraudPreventionPlugin } from '../src/plugin';
@@ -175,15 +175,27 @@ run('@huloglobal/vendure-plugin-fraud-prevention (MariaDB)', () => {
     });
 
     it('resolveAvsForOrder reads payment metadata and fails open without it', async () => {
-        const ctx = { channelId: 1 } as any;
+        const ctx = RequestContext.empty();
         const withMeta = await svc().resolveAvsForOrder(ctx, {
             id: 999999, code: 'T1', payments: [{ state: 'Settled', method: 'x', metadata: { avs: { postalCode: 'fail' } } }],
         } as any);
         expect(withMeta).toEqual({ source: 'payment metadata', postalCode: 'fail' });
+
+        // No metadata verdict, a PaymentIntent id, but no Stripe payment
+        // method under that code: the lookup is skipped and nothing throws.
         const without = await svc().resolveAvsForOrder(ctx, {
-            id: 999998, code: 'T2', payments: [{ state: 'Settled', method: 'x', metadata: { paymentIntentId: 'pi_x' } }],
+            id: 999998, code: 'T2', payments: [{ state: 'Settled', method: 'no-such-method', metadata: { paymentIntentId: 'pi_x' } }],
         } as any);
         expect(without).toBeNull();
+
+        // A settled payment wins over an earlier declined attempt.
+        const settledFirst = await svc().resolveAvsForOrder(ctx, {
+            id: 999997, code: 'T3', payments: [
+                { state: 'Declined', method: 'x', metadata: { avs: { postalCode: 'fail' } } },
+                { state: 'Settled', method: 'x', metadata: { avs: { postalCode: 'pass' } } },
+            ],
+        } as any);
+        expect(settledFirst).toEqual({ source: 'payment metadata', postalCode: 'pass' });
     });
 
     it('simulate accepts postcode + AVS inputs (admin)', async () => {
