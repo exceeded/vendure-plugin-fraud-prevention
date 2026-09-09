@@ -227,6 +227,20 @@ run('@huloglobal/vendure-plugin-fraud-prevention (MariaDB)', () => {
         expect(await svc().listCases(undefined, "avs' OR 1=1 --")).toEqual([]);
     });
 
+    it('activity log can be narrowed to assessments with an AVS fail', async () => {
+        const base = { channelId: 1, ip: '203.0.113.50', orderValuePence: 2000 };
+        const hit = { ...base, email: 'avs.log@example.com', orderId: 434242, orderCode: 'AVSLOG' };
+        await svc().logAssessment(hit as any, await svc().assess({ ...hit, avs: { postalCode: 'fail', source: 'test' }, dryRun: true }));
+        const miss = { ...base, email: 'plain.log@example.com', orderId: 434243, orderCode: 'PLAINLOG' };
+        await svc().logAssessment(miss as any, await svc().assess({ ...miss, dryRun: true }));
+        const all = (await svc().log({})).map((r: any) => r.orderCode);
+        expect(all).toEqual(expect.arrayContaining(['AVSLOG', 'PLAINLOG']));
+        const avsOnly = (await svc().log({ signal: 'avs' })).map((r: any) => r.orderCode);
+        expect(avsOnly).toContain('AVSLOG');
+        expect(avsOnly).not.toContain('PLAINLOG');
+        expect(await svc().log({ signal: "avs' OR 1=1 --" })).toEqual([]);
+    });
+
     it('gives trust credit to a returning customer (negative points, floored at 0)', async () => {
         const a = await svc().assess({
             channelId: 1, email: 'loyal@example.com', ip: '203.0.113.13',

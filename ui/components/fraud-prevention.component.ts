@@ -765,6 +765,12 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                     <option value="review">review</option><option value="block">block</option>
                                     <option value="approved">approved</option><option value="rejected">rejected</option>
                                 </select>
+                                <span class="mode-seg" title="Only assessments where the card issuer reported an AVS postcode or street-address mismatch">
+                                    <button class="seg seg-avs" [class.active]="logSignal === 'avs'" (click)="logSignal = logSignal === 'avs' ? '' : 'avs'; loadLog()">
+                                        <svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M2 10h20" stroke="currentColor" stroke-width="2"/><path d="M6 15h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                                        AVS fails
+                                    </button>
+                                </span>
                                 <button class="gbtn gbtn-outline gbtn-sm" (click)="exportCsv()" [disabled]="!logRows.length">Export CSV</button>
                             </span>
                         </div>
@@ -782,7 +788,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                                 </tr>
                             </tbody>
                         </table>
-                        <ng-template #noLog><p class="hint">Nothing logged yet{{ current.mode === 'off' ? ' — the channel is off' : '' }}.</p></ng-template>
+                        <ng-template #noLog><p class="hint">{{ logSignal === 'avs' ? 'No assessments with a card AVS mismatch yet' : 'Nothing logged yet' }}{{ current.mode === 'off' ? ' — the channel is off' : '' }}.</p></ng-template>
                     </div>
                 </div>
             </vdr-page-block>
@@ -1467,6 +1473,8 @@ export class FraudPreventionComponent implements OnInit {
     logRows: any[] = [];
     logLevel = '';
     logAction = '';
+    /** '' = every signal, 'avs' = only assessments with an issuer AVS fail. */
+    logSignal = '';
 
     notif: any = null;
     notifDirty = false;
@@ -1989,6 +1997,7 @@ export class FraudPreventionComponent implements OnInit {
         const params = new URLSearchParams();
         if (this.logLevel) params.set('level', this.logLevel);
         if (this.logAction) params.set('action', this.logAction);
+        if (this.logSignal) params.set('signal', this.logSignal);
         this.http.get<any[]>(`/fraud-prevention/log?${params}`).subscribe({
             next: rows => { this.logRows = rows; this.cdr.markForCheck(); },
             error: () => undefined,

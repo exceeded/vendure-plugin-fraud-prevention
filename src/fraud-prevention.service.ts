@@ -843,11 +843,15 @@ export class FraudPreventionService implements OnModuleInit {
         };
     }
 
-    async log(filter: { level?: string; action?: string; take?: number }): Promise<any[]> {
+    /** Activity log. `signal` narrows to rows where a signal key with that
+     *  prefix fired ('avs' = issuer AVS verdict), same as listCases. */
+    async log(filter: { level?: string; action?: string; signal?: string; take?: number }): Promise<any[]> {
         const clauses: string[] = [`action IS NOT NULL`];
         const params: any[] = [];
         if (filter.level) { clauses.push(`riskLevel = ?`); params.push(filter.level); }
         if (filter.action) { clauses.push(`action = ?`); params.push(filter.action); }
+        const prefix = (filter.signal || '').replace(/[^a-z0-9_]/gi, '');
+        if (prefix) { clauses.push(`signals LIKE ?`); params.push(`%"key":"${prefix}%`); }
         return this.db.query(
             `SELECT * FROM fraud_log WHERE ${clauses.join(' AND ')}
              ORDER BY createdAt DESC LIMIT ${Math.min(filter.take || 100, 500)}`,

@@ -220,10 +220,11 @@ export class FraudPreventionController {
     @Get('log')
     async log(
         @Ctx() ctx: RequestContext, @Res() res: Response,
-        @Query('level') level?: string, @Query('action') action?: string, @Query('take') take?: string,
+        @Query('level') level?: string, @Query('action') action?: string,
+        @Query('signal') signal?: string, @Query('take') take?: string,
     ) {
         if (denyUnlessAdmin(ctx, res, false)) return;
-        return res.json(await this.service.log({ level, action, take: Number(take || 100) }));
+        return res.json(await this.service.log({ level, action, signal, take: Number(take || 100) }));
     }
 
     // ── Admin: review queue ────────────────────────────────────────────

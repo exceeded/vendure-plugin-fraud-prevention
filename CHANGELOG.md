@@ -5,6 +5,11 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.4] — 2026-09-09
+
+### Added
+- **Activity log AVS filter.** The same *AVS fails* toggle as the review queue, next to the level and action pickers; combines with both, and the CSV export follows the filtered rows. `GET /fraud-prevention/log` accepts `signal=avs`.
+
 ## [0.18.3] — 2026-09-09
 
 ### Added
