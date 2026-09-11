@@ -5,6 +5,19 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] — 2026-09-11
+
+### Added
+- **Reject really cancels.** Rejecting a review case now cancels the order through Vendure's `OrderService.cancelOrder` (state machine, order history and every `OrderStateTransitionEvent` subscriber see it), voids Authorized payments (card holds, bank transfers) and refunds every settled payment in full through the payment handler's `createRefund`. Previously only `order.active` was cleared, so a rejected order was still fulfilled by hosts gating on open cases alone. New plugin options `cancelOnReject` and `refundOnReject` (both default true); `POST /fraud-prevention/cases/:id/reject` accepts per-case `cancel` / `refund` overrides and returns `cancelled`, `orderState`, `refunds` and `warnings`. Vendure refusals never block the decision — they are reported in `warnings`, the audit log, the ops alert and the admin toast.
+- **Stripe Radar and 3-D Secure signals.** The existing Stripe lookup also reads `outcome.risk_level` and `payment_method_details.card.three_d_secure`: `radar_risk_elevated` (15), `radar_risk_highest` (35) and `three_ds_failed` (10 — 3DS ran and the cardholder did not authenticate; `attempt_acknowledged` / `exempted` / `not_supported` are benign). `three_ds_failed` is gated by the channel's existing *3-D Secure* rule, which now does something. The Simulate tab has Radar / 3DS inputs; card-network verdicts (AVS, Radar, 3DS) are highlighted together in the review queue and the order panel.
+- **Checkout-guard failed payments.** The *Failed payments from IP* signal also counts `failed` / `client_declined` rows from `checkout_guard_payment_event` (written by `@huloglobal/vendure-plugin-checkout-guard` before any Vendure `Payment` row exists) when that table is present. Detected automatically; nothing to configure.
+- **Fulfilment gating helpers.** `FraudPreventionService.isAssessed(orderId)` / `assessedOrderIds(ids)` — true once the order guard has scored the order — close the race between `OrderPlacedEvent` and the asynchronous assessment; `heldOrderIds()` returns pending **and** rejected cases. `pendingOrderIds()` is unchanged.
+- Exports: `CardChecks` (`AvsResult` stays as an alias), `RadarRiskLevel`, `ThreeDsResult`, `ResolveCaseResult`, `cardChecksFromStripeCharge`, `cardChecksFromMetadata`, `fetchStripeCardChecks`, `parseRiskLevel`, `parseThreeDsAuthenticated`, `threeDsFailed`.
+
+### Changed
+- `avsResolver` may return Radar / 3DS fields alongside the AVS ones; payment metadata readers accept `riskLevel` / `threeDsAuthenticated` / `threeDsResult` (canonical `avs` object), Stripe-style `outcome` / `three_d_secure` objects and flat keys.
+- `FraudPreventionService` now injects `OrderService` and `RequestContextService` (both provided by `PluginCommonModule`).
+
 ## [0.18.4] — 2026-09-09
 
 ### Added

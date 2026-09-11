@@ -6,7 +6,7 @@
  * the channel's mode decides what actually happens.
  */
 
-import type { AvsResult } from './avs';
+import type { CardChecks } from './avs';
 
 export type FraudMode = 'off' | 'monitor' | 'enforce';
 
@@ -59,6 +59,8 @@ export interface FraudChannelConfig {
     blockVpnProxy: boolean;
     blockHighRiskCountries: boolean;
     highRiskCountries: string;
+    /** Score `three_ds_failed` when 3-D Secure ran and the cardholder did
+     *  not authenticate (default on). Off = the 3DS outcome is ignored. */
     enforce3dSecure: boolean;
     // Failed payments
     maxFailedPaymentsPerIpPerHour: number;
@@ -111,6 +113,10 @@ export const DEFAULT_WEIGHTS: Record<string, number> = {
     avs_postcode_fail: 35,
     avs_address_fail: 20,
     postcode_mismatch: 8,
+    // Stripe Radar's own verdict on the charge and the 3-D Secure outcome.
+    radar_risk_elevated: 15,
+    radar_risk_highest: 35,
+    three_ds_failed: 10,
 };
 
 export const DEFAULT_CONFIG: Omit<FraudChannelConfig, 'channelId' | 'channelCode'> = {
@@ -159,9 +165,20 @@ export interface FraudPreventionPluginOptions {
     logRetentionDays?: number;
     /** Disable the daily threat-feed sync cron (default false). */
     disableFeedSync?: boolean;
-    /** Supply card AVS results for gateways the plugin cannot read itself.
-     *  Called once per placed order with the Vendure Order (payments
-     *  loaded) and the request context; return null when unknown. Takes
-     *  precedence over payment metadata and the built-in Stripe lookup. */
-    avsResolver?: (order: any, ctx: any) => Promise<AvsResult | null | undefined> | AvsResult | null | undefined;
+    /** Supply card checks (AVS, Radar risk level, 3DS outcome) for
+     *  gateways the plugin cannot read itself. Called once per placed
+     *  order with the Vendure Order (payments loaded) and the request
+     *  context; return null when unknown. Takes precedence over payment
+     *  metadata and the built-in Stripe lookup. */
+    avsResolver?: (order: any, ctx: any) => Promise<CardChecks | null | undefined> | CardChecks | null | undefined;
+    /** Rejecting a review case cancels the order through Vendure's
+     *  `OrderService.cancelOrder` (Authorized payments are voided, the
+     *  order moves to `Cancelled`). Default true. Set false when the host
+     *  handles cancellation itself from the `case.rejected` ops event. */
+    cancelOnReject?: boolean;
+    /** Rejecting a review case also refunds every settled payment in full
+     *  through `OrderService.refundOrder` (the payment handler's
+     *  `createRefund`). Default true. Ignored when `cancelOnReject` is
+     *  false. A per-case `refund: false` in the reject request overrides. */
+    refundOnReject?: boolean;
 }

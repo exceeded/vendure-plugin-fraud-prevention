@@ -21,12 +21,15 @@ Each fired signal adds weighted points (all weights overridable per channel):
 | IP order velocity (hour / day) | 40 / 30 |
 | High-risk country | 40 |
 | Card AVS: postcode mismatch (issuer verdict) | 35 |
+| Stripe Radar: highest risk | 35 |
 | Email order velocity (24h) | 35 |
 | Email daily value ceiling | 30 |
 | Order value ceiling | 25 |
 | Card AVS: street address mismatch (issuer verdict) | 20 |
 | First order + high value | 18 |
+| Stripe Radar: elevated risk | 15 |
 | Plus-addressed email (`x+7@gmail`) | 12 |
+| 3-D Secure failed (no liability shift) | 10 |
 | Billing / shipping postcode differ (typed) | 8 |
 
 Emails are canonicalised before velocity counting — `x+1@gmail.com`,
@@ -75,6 +78,39 @@ is scored separately and weakly — gifts and office deliveries do this
 legitimately, but it compounds with the other signals. All three weights are
 overridable per channel like every other signal.
 
+The plugin also counts failed payments the
+[checkout-guard plugin](https://huloglobal.com/vendure-plugins/checkout-guard/)
+records before a Vendure `Payment` row exists (gateway declines and
+storefront-reported client declines in `checkout_guard_payment_event`) towards
+the *Failed payments from IP* signal, when that table is present. Nothing to
+configure — it is detected automatically.
+
+### Stripe Radar and 3-D Secure
+
+The same Stripe lookup that reads the AVS checks also reads the charge's
+**Radar risk level** (`outcome.risk_level`) and its **3-D Secure outcome**
+(`payment_method_details.card.three_d_secure`), so orders paid through
+Vendure's `StripePlugin` get three more signals for free:
+
+| Signal | Fires when | Default points |
+|---|---|---|
+| `radar_risk_highest` | Radar rated the charge `highest` | 35 |
+| `radar_risk_elevated` | Radar rated the charge `elevated` | 15 |
+| `three_ds_failed` | 3DS ran and `authenticated` is `false` (result not `attempt_acknowledged` / `exempted` / `not_supported`) | 10 |
+
+Radar sees the card across every Stripe merchant, so `highest` is a strong
+signal even when nothing else fired; `normal` and `not_assessed` are silent.
+`three_ds_failed` means liability did *not* shift to the issuer — a chargeback
+would land on you. It is gated by the channel's *Score a failed 3-D Secure
+authentication* rule (on by default). Wallet payments (Apple Pay, Google Pay,
+Link) are authenticated by the wallet and carry neither AVS nor 3DS data;
+Radar still assesses them.
+
+Other gateways can supply the same verdicts through `avsResolver` or payment
+metadata — return `{ riskLevel: 'elevated' | 'highest', threeDsAuthenticated:
+false, threeDsResult: 'failed' }` alongside the AVS fields (the type is
+`CardChecks`; `AvsResult` remains as an alias).
+
 ## Enforcement modes (per channel)
 
 - **Off** — nothing, not even logging.
@@ -84,7 +120,15 @@ overridable per channel like every other signal.
   (with the host integration below) holds licence-key/goods fulfilment until
   a human approves; score ≥ block threshold additionally emails the customer
   that their order is under verification. Approve releases + notifies;
-  reject cancels + notifies.
+  reject cancels the order in Vendure (`OrderService.cancelOrder`, so every
+  `OrderStateTransitionEvent` subscriber sees it), voids Authorized payments
+  (card holds, bank transfers), refunds every settled payment in full through
+  the payment handler's `createRefund`, marks the order inactive and notifies
+  the customer. Set `cancelOnReject: false` / `refundOnReject: false` in the
+  plugin options to opt out, or pass `cancel` / `refund` per case in
+  `POST /fraud-prevention/cases/:id/reject`. Anything Vendure refused
+  (`RefundOrderStateError`, a handler without `createRefund`, …) comes back in
+  `warnings` and the audit log — the case still closes.
 
 ## Threat feeds
 
@@ -125,14 +169,39 @@ The plugin marks orders as held; your fulfilment path asks before shipping:
 ```ts
 import { FraudPreventionService } from '@huloglobal/vendure-plugin-fraud-prevention';
 
-const held = new Set(await this.fraudService.pendingOrderIds());
-if (held.has(orderId)) continue; // skip until a human approves
+const held = new Set(await this.fraudService.heldOrderIds()); // pending + rejected
+if (held.has(orderId)) continue;                                // skip until a human approves
+if (!(await this.fraudService.isAssessed(orderId))) continue;   // not scored yet — try again shortly
 ```
+
+`pendingOrderIds()` (open cases only) is unchanged. `heldOrderIds()` also
+includes rejected cases, so a rejected order is never released by a
+fulfilment path that only checks for open cases. `isAssessed(orderId)` (and
+the batch `assessedOrderIds(ids)`) closes the race between `OrderPlacedEvent`
+and the guard's asynchronous assessment: an order that has not been scored
+yet has no case to hold it, so fulfil only once both are true. Every placed
+order gets a `fraud_log` row — even with the channel off — so `isAssessed`
+becomes true within a second or two of placement.
 
 ### Storefront pre-check (optional)
 
 `POST /fraud-prevention/check` `{ email, orderValuePence, channelId }` →
 `{ allowed, riskLevel }` — rate-limited, minimal response shape by design.
+
+### Options
+
+| Option | Default | Purpose |
+|---|---|---|
+| `publicBaseUrl` | — | Used in admin notification links and licence host binding |
+| `licenceKey` | — | JWT from huloglobal.com; also activatable from the admin |
+| `defaultAdminEmail` | — | Where fraud-alert emails go when no per-install setting exists |
+| `smtp` | `SMTP_*` env | SMTP transport for alerts and customer notices |
+| `rateLimit` | 60 / min | Rate limit for the public `/fraud-prevention/check` endpoint |
+| `logRetentionDays` | 180 | Prune `fraud_log` rows older than this (0 = keep) |
+| `disableFeedSync` | false | Skip the daily threat-feed sync |
+| `avsResolver` | — | Supply `CardChecks` (AVS, Radar, 3DS) for any gateway |
+| `cancelOnReject` | true | Rejecting a case cancels the order through Vendure |
+| `refundOnReject` | true | Rejecting a case refunds settled payments in full |
 
 ## Licensing
 

@@ -4,12 +4,13 @@
  * `FraudPreventionPlugin` registers the assessment engine, the order
  * guard, the admin REST surface and the multi-tab admin UI.
  * `FraudPreventionService` is exported so host projects can integrate —
- * most importantly `pendingOrderIds()` for gating fulfilment on open
- * review cases, and `assess()` for custom checkout flows.
+ * most importantly `pendingOrderIds()` / `heldOrderIds()` and
+ * `isAssessed()` for gating fulfilment on review cases, and `assess()`
+ * for custom checkout flows.
  */
 
 export { FraudPreventionPlugin, FraudPluginInitOptions, getOptions } from './plugin';
-export { FraudPreventionService, AssessInput } from './fraud-prevention.service';
+export { FraudPreventionService, AssessInput, ResolveCaseResult } from './fraud-prevention.service';
 export {
     DEFAULT_CONFIG,
     DEFAULT_WEIGHTS,
@@ -25,10 +26,19 @@ export { ipInCidr, ipv4ToInt, normalizeEmail } from './net-util';
 export {
     AvsCheck,
     AvsResult,
+    CardChecks,
+    RadarRiskLevel,
+    ThreeDsResult,
     avsFromMetadata,
     avsFromStripeCharge,
+    cardChecksFromMetadata,
+    cardChecksFromStripeCharge,
     fetchStripeAvs,
+    fetchStripeCardChecks,
     normalisePostcode,
     parseAvsCheck,
+    parseRiskLevel,
+    parseThreeDsAuthenticated,
     postcodesDiffer,
+    threeDsFailed,
 } from './avs';

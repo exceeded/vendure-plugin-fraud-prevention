@@ -78,7 +78,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     <div class="hulo-help-card">
                         <div class="hulo-help-num">3</div>
                         <h4>Work the queue</h4>
-                        <p>Held orders appear in Review. Approve releases the licence keys and emails the customer; Reject cancels and notifies them. Everything is written to the audit log.</p>
+                        <p>Held orders appear in Review. Approve releases the licence keys and emails the customer; Reject cancels the order in Vendure, voids any card hold, refunds settled payments and notifies them. Everything is written to the audit log.</p>
                     </div>
                 </div>
                 <div class="hulo-help-links">
@@ -422,11 +422,11 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                         <h3 class="step-title">Signals</h3>
                         <div class="form-grid">
                             <label class="check-label"><input type="checkbox" [(ngModel)]="current.blockDisposableEmails" (ngModelChange)="markDirty()"> Penalise disposable email domains</label>
-                            <label class="check-label"><input type="checkbox" [(ngModel)]="current.enforce3dSecure" (ngModelChange)="markDirty()"> Require 3-D Secure on card payments</label>
+                            <label class="check-label"><input type="checkbox" [(ngModel)]="current.enforce3dSecure" (ngModelChange)="markDirty()"> Score a failed 3-D Secure authentication <small>(<code>three_ds_failed</code>)</small></label>
                             <label class="check-label"><input type="checkbox" [(ngModel)]="current.blockHighRiskCountries" (ngModelChange)="markDirty()"> Penalise high-risk countries</label>
                             <label class="check-label"><input type="checkbox" [(ngModel)]="current.avsLookup" (ngModelChange)="markDirty()"> Check card AVS with Stripe <small>(postcode / street mismatch)</small></label>
                         </div>
-                        <p class="hint" style="margin-top:6px">AVS is the card issuer's own verdict on the billing address. Orders paid through Stripe are looked up automatically; other gateways can pass the result in payment metadata or an <code>avsResolver</code>. A typed billing / shipping postcode difference is scored separately as a weak signal.</p>
+                        <p class="hint" style="margin-top:6px">AVS is the card issuer's own verdict on the billing address. Orders paid through Stripe are looked up automatically — the same lookup also reads Stripe Radar's risk level (<code>radar_risk_elevated</code> / <code>radar_risk_highest</code>) and the 3-D Secure outcome; other gateways can pass the result in payment metadata or an <code>avsResolver</code>. A typed billing / shipping postcode difference is scored separately as a weak signal.</p>
                         <div class="form-row" *ngIf="current.blockHighRiskCountries" style="margin-top:10px">
                             <label>High-risk country codes <small>(comma-separated ISO codes)</small></label>
                             <input class="form-input" [(ngModel)]="current.highRiskCountries" (ngModelChange)="markDirty()" placeholder="NG, PK, VN">
@@ -656,6 +656,14 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                             <div><label>Card AVS: street address <small>(issuer result)</small></label>
                                 <select class="form-input" [(ngModel)]="sim.avsLine1">
                                     <option value="">Not checked</option><option value="pass">Pass</option><option value="fail">Fail</option><option value="unavailable">Unavailable</option>
+                                </select></div>
+                            <div><label>Stripe Radar <small>(risk level)</small></label>
+                                <select class="form-input" [(ngModel)]="sim.radarRiskLevel">
+                                    <option value="">Not assessed</option><option value="normal">Normal</option><option value="elevated">Elevated</option><option value="highest">Highest</option>
+                                </select></div>
+                            <div><label>3-D Secure <small>(outcome)</small></label>
+                                <select class="form-input" [(ngModel)]="sim.threeDs">
+                                    <option value="">Did not run</option><option value="authenticated">Authenticated</option><option value="failed">Failed</option>
                                 </select></div>
                         </div>
                         <label class="check-label" style="margin-bottom:12px"><input type="checkbox" [(ngModel)]="sim.newCustomer"> Treat as first-time customer</label>
@@ -1466,7 +1474,7 @@ export class FraudPreventionComponent implements OnInit {
     newBl = { type: 'email', value: '', note: '' };
     syncBusy = false;
 
-    sim = { email: '', ip: '', valueGbp: 100, country: '', newCustomer: false, billingPostcode: '', shippingPostcode: '', avsPostalCode: '', avsLine1: '' };
+    sim = { email: '', ip: '', valueGbp: 100, country: '', newCustomer: false, billingPostcode: '', shippingPostcode: '', avsPostalCode: '', avsLine1: '', radarRiskLevel: '', threeDs: '' };
     simResult: any = null;
     simBusy = false;
 
@@ -1794,7 +1802,16 @@ export class FraudPreventionComponent implements OnInit {
                 if (r.ok) {
                     const quiet = payload.notifyCustomer === false ? ' (silently)' : '';
                     const banned = r.blocklisted?.length ? ` — ${r.blocklisted.length} identity value(s) blocklisted` : '';
-                    this.notification.success(`Case ${action === 'approve' ? 'approved — keys released' : 'rejected — order cancelled'}${quiet}${banned}`);
+                    if (action === 'approve') {
+                        this.notification.success(`Case approved — keys released${quiet}`);
+                    } else {
+                        const refunded = (r.refunds || []).reduce((n: number, x: any) => n + Number(x.amount || 0), 0);
+                        const outcome = r.cancelled
+                            ? `order cancelled${refunded ? ` and ${(refunded / 100).toFixed(2)} refunded` : ''}`
+                            : 'order NOT cancelled';
+                        this.notification.success(`Case rejected — ${outcome}${quiet}${banned}`);
+                        if (r.warnings?.length) this.notification.warning(`Finish by hand: ${r.warnings.join('; ')}`);
+                    }
                     this.loadCases();
                     this.loadStats();
                 } else {
@@ -1812,13 +1829,16 @@ export class FraudPreventionComponent implements OnInit {
         try {
             const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
             if (!Array.isArray(arr)) return [];
-            // Issuer AVS verdicts first, then everything else in scoring order.
+            // Card verdicts (issuer AVS, Stripe Radar, 3DS) first, then
+            // everything else in scoring order.
             return [...arr].sort((a, b) => Number(this.isAvsSignal(b)) - Number(this.isAvsSignal(a)));
         } catch { return []; }
     }
 
+    /** Signals that come from the card network / gateway rather than from
+     *  what the customer typed: AVS, Stripe Radar, 3-D Secure. */
     isAvsSignal(s: { key?: string }): boolean {
-        return typeof s?.key === 'string' && s.key.startsWith('avs_');
+        return typeof s?.key === 'string' && (s.key.startsWith('avs_') || s.key.startsWith('radar_') || s.key === 'three_ds_failed');
     }
 
     scoreClass(score: number): string {
@@ -1975,6 +1995,8 @@ export class FraudPreventionComponent implements OnInit {
             shippingPostalCode: this.sim.shippingPostcode || undefined,
             avsPostalCode: this.sim.avsPostalCode || undefined,
             avsLine1: this.sim.avsLine1 || undefined,
+            radarRiskLevel: this.sim.radarRiskLevel || undefined,
+            threeDsAuthenticated: this.sim.threeDs === 'authenticated' ? true : this.sim.threeDs === 'failed' ? false : undefined,
             isReturningCustomer: this.sim.newCustomer ? false : undefined,
         }).subscribe({
             next: r => { this.simBusy = false; this.simResult = r; this.cdr.markForCheck(); },

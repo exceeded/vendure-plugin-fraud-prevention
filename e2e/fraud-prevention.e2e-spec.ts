@@ -1,8 +1,24 @@
-import { mergeConfig, RequestContext } from '@vendure/core';
+import { LanguageCode, mergeConfig, PaymentMethodHandler, RequestContext, TransactionalConnection } from '@vendure/core';
 import { createTestEnvironment, registerInitializer, MysqlInitializer, testConfig } from '@vendure/testing';
+import gql from 'graphql-tag';
 import { initialData } from '../../../e2e-shared/initial-data';
 import { FraudPreventionPlugin } from '../src/plugin';
 import { FraudPreventionService } from '../src/fraud-prevention.service';
+
+/** A card-like handler: settles immediately, supports full refunds and
+ *  voids, so the reject → cancel + refund path exercises real Vendure
+ *  Payment / Refund rows. */
+const e2ePaymentHandler = new PaymentMethodHandler({
+    code: 'fp-e2e-pay',
+    description: [{ languageCode: LanguageCode.en, value: 'E2E test payment' }],
+    args: {},
+    createPayment: async (ctx, order, amount) => ({
+        amount, state: 'Settled' as const, transactionId: `e2e-${order.code}`, metadata: { paymentIntentId: 'pi_e2e' },
+    }),
+    settlePayment: async () => ({ success: true }),
+    cancelPayment: async () => ({ success: true }),
+    createRefund: async (ctx, input, amount) => ({ state: 'Settled' as const, transactionId: `rf-${Date.now()}` }),
+});
 
 /**
  * Fraud-prevention targets MySQL / MariaDB (its risk queries use
@@ -47,14 +63,26 @@ run('@huloglobal/vendure-plugin-fraud-prevention (MariaDB)', () => {
         customFields: {
             Order: [{ name: 'ip', type: 'string' as const, nullable: true }],
         },
+        paymentOptions: { paymentMethodHandlers: [e2ePaymentHandler] },
         plugins: [
             FraudPreventionPlugin.init({ publicBaseUrl: BASE, defaultAdminEmail: 'ops@test.local' }),
         ],
     });
-    const { server, adminClient } = createTestEnvironment(config);
+    const { server, adminClient, shopClient } = createTestEnvironment(config);
+
+    const raw = () => (server as any).app.get(TransactionalConnection).rawConnection as { query(sql: string, params?: any[]): Promise<any> };
 
     beforeAll(async () => {
         await server.init({ initialData, productsCsvPath: '', customerCount: 0 } as any);
+        // The checkout-guard plugin's failed-payment table, as that plugin
+        // would create it. Present from the start so the existence check
+        // (cached for ten minutes) sees it before the first assessment.
+        await raw().query(`CREATE TABLE IF NOT EXISTS checkout_guard_payment_event (
+            id INT AUTO_INCREMENT PRIMARY KEY, channelId INT NOT NULL DEFAULT 1, orderId INT NULL, orderCode VARCHAR(64) NULL,
+            kind VARCHAR(32) NOT NULL, provider VARCHAR(32) NULL, providerRef VARCHAR(128) NULL, code VARCHAR(64) NULL,
+            message TEXT NULL, amountMinor INT NULL, currency VARCHAR(8) NULL, ip VARCHAR(64) NULL, createdAt DATETIME NOT NULL
+        )`);
+        await raw().query(`DELETE FROM checkout_guard_payment_event`);
     }, 120_000);
 
     afterAll(async () => {
@@ -322,5 +350,294 @@ run('@huloglobal/vendure-plugin-fraud-prevention (MariaDB)', () => {
         await svc().removeCustomFeed(feed.id);
         const afterRemove = await svc().listCustomFeeds();
         expect(afterRemove.some((f: any) => f.id === feed.id)).toBe(false);
+    });
+
+    // ── Stripe Radar + 3-D Secure signals ─────────────────────────────
+    it('fires the Radar and 3DS signals from card checks and stays silent on normal / authenticated', async () => {
+        const hot = await svc().assess({
+            channelId: 1, email: 'radar.hot@example.com', ip: '203.0.113.60', orderValuePence: 2000,
+            avs: { riskLevel: 'highest', riskScore: 91, threeDsAuthenticated: false, threeDsResult: 'failed', source: 'stripe' }, dryRun: true,
+        });
+        const keys = hot.signals.map(s => s.key);
+        expect(keys).toContain('radar_risk_highest');
+        expect(keys).toContain('three_ds_failed');
+        expect(keys).not.toContain('radar_risk_elevated');
+        expect(hot.signals.find(s => s.key === 'radar_risk_highest')!.points).toBe(35);
+        expect(hot.signals.find(s => s.key === 'radar_risk_highest')!.detail).toMatch(/risk score 91/);
+        expect(hot.signals.find(s => s.key === 'three_ds_failed')!.points).toBe(10);
+
+        const warm = await svc().assess({
+            channelId: 1, email: 'radar.warm@example.com', orderValuePence: 2000,
+            avs: { riskLevel: 'elevated', threeDsAuthenticated: false, threeDsResult: 'attempt_acknowledged' }, dryRun: true,
+        });
+        expect(warm.signals.map(s => s.key)).toEqual(['radar_risk_elevated']);
+        expect(warm.score).toBe(15);
+
+        const quiet = await svc().assess({
+            channelId: 1, email: 'radar.quiet@example.com', orderValuePence: 2000,
+            avs: { riskLevel: 'normal', threeDsAuthenticated: true, postalCode: 'pass' }, dryRun: true,
+        });
+        expect(quiet.signals).toHaveLength(0);
+    });
+
+    it('the 3DS signal honours the channel rule toggle', async () => {
+        const cfg = await svc().getConfig(1);
+        await svc().saveConfig({ ...cfg, channelId: 1, enforce3dSecure: false } as any);
+        const off = await svc().assess({
+            channelId: 1, email: '3ds.off@example.com', orderValuePence: 2000,
+            avs: { threeDsAuthenticated: false }, dryRun: true,
+        });
+        expect(off.signals.map(s => s.key)).not.toContain('three_ds_failed');
+        await svc().saveConfig({ ...cfg, channelId: 1, enforce3dSecure: true } as any);
+        const on = await svc().assess({
+            channelId: 1, email: '3ds.on@example.com', orderValuePence: 2000,
+            avs: { threeDsAuthenticated: false }, dryRun: true,
+        });
+        expect(on.signals.map(s => s.key)).toContain('three_ds_failed');
+    });
+
+    it('simulate accepts Radar + 3DS inputs (admin)', async () => {
+        await adminClient.asSuperAdmin();
+        const token = (adminClient as any).authToken as string;
+        const res = await fetch(`${BASE}/fraud-prevention/simulate`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ channelId: 1, email: 'sim2@example.com', orderValuePence: 1000, radarRiskLevel: 'elevated', threeDsAuthenticated: false }),
+        });
+        expect(res.status).toBe(200);
+        const a = await res.json();
+        const keys = a.signals.map((s: any) => s.key);
+        expect(keys).toContain('radar_risk_elevated');
+        expect(keys).toContain('three_ds_failed');
+        expect(a.signals.find((s: any) => s.key === 'radar_risk_elevated').detail).toMatch(/simulated/);
+    });
+
+    it('resolveAvsForOrder passes Radar / 3DS through from payment metadata', async () => {
+        const ctx = RequestContext.empty();
+        const r = await svc().resolveAvsForOrder(ctx, {
+            id: 999996, code: 'T4', payments: [{ state: 'Settled', method: 'x', metadata: { outcome: { risk_level: 'highest' }, three_d_secure: { authenticated: false, result: 'failed' } } }],
+        } as any);
+        expect(r).toEqual({ source: 'payment metadata', riskLevel: 'highest', threeDsAuthenticated: false, threeDsResult: 'failed' });
+    });
+
+    // ── Checkout-guard failed payments ────────────────────────────────
+    it('counts checkout-guard gateway / client declines towards failed_payments', async () => {
+        const ip = '203.0.113.99';
+        expect(await svc().countCheckoutGuardFailures(ip)).toBe(0);
+        for (const kind of ['failed', 'client_declined', 'failed', 'orphan']) {
+            await raw().query(
+                `INSERT INTO checkout_guard_payment_event (channelId, kind, provider, ip, createdAt) VALUES (1, ?, 'stripe', ?, NOW())`,
+                [kind, ip],
+            );
+        }
+        // A stale row outside the window never counts.
+        await raw().query(
+            `INSERT INTO checkout_guard_payment_event (channelId, kind, provider, ip, createdAt) VALUES (1, 'failed', 'stripe', ?, DATE_SUB(NOW(), INTERVAL 3 HOUR))`,
+            [ip],
+        );
+        expect(await svc().countCheckoutGuardFailures(ip)).toBe(3);
+        expect(await svc().countCheckoutGuardFailures(ip, 24 * 60)).toBe(4);
+        expect(await svc().countCheckoutGuardFailures('203.0.113.98')).toBe(0);
+
+        const a = await svc().assess({ channelId: 1, email: 'declines@example.com', ip, orderValuePence: 2000, dryRun: true });
+        const fp = a.signals.find(s => s.key === 'failed_payments');
+        expect(fp).toBeTruthy();
+        expect(fp!.detail).toMatch(/3 failed payments/);
+        expect(fp!.detail).toMatch(/gateway\/client declines/);
+    });
+
+    // ── Reject → cancel + refund through Vendure ───────────────────────
+    async function placeOrder(email: string): Promise<{ id: string; code: string; total: number }> {
+        await adminClient.asSuperAdmin();
+        // One-off catalogue: tax category, product + variant, shipping and
+        // payment methods (idempotent via code lookups).
+        const { taxCategories } = await adminClient.query(gql`{ taxCategories { items { id isDefault } } }`);
+        if (!taxCategories.items.length) {
+            await adminClient.query(gql`mutation { createTaxCategory(input: { name: "Standard", isDefault: true }) { id } }`);
+        }
+        const { products } = await adminClient.query(gql`{ products(options: { filter: { slug: { eq: "fp-key" } } }) { items { id variants { id } } } }`);
+        let variantId: string = products.items[0]?.variants?.[0]?.id;
+        if (!variantId) {
+            const { createProduct } = await adminClient.query(gql`mutation {
+                createProduct(input: { enabled: true, translations: [{ languageCode: en, name: "FP licence key", slug: "fp-key", description: "" }] }) { id }
+            }`);
+            const { createProductVariants } = await adminClient.query(gql`mutation ($productId: ID!) {
+                createProductVariants(input: [{ productId: $productId, sku: "FP-KEY", price: 12000, trackInventory: FALSE, stockOnHand: 1000, translations: [{ languageCode: en, name: "FP licence key" }] }]) { id }
+            }`, { productId: createProduct.id });
+            variantId = createProductVariants[0].id;
+        }
+        const { shippingMethods } = await adminClient.query(gql`{ shippingMethods { items { id code } } }`);
+        let shippingId: string = shippingMethods.items.find((m: any) => m.code === 'fp-e2e-ship')?.id;
+        if (!shippingId) {
+            const { createShippingMethod } = await adminClient.query(gql`mutation {
+                createShippingMethod(input: {
+                    code: "fp-e2e-ship", fulfillmentHandler: "manual-fulfillment",
+                    checker: { code: "default-shipping-eligibility-checker", arguments: [{ name: "orderMinimum", value: "0" }] },
+                    calculator: { code: "default-shipping-calculator", arguments: [{ name: "rate", value: "0" }, { name: "includesTax", value: "auto" }, { name: "taxRate", value: "0" }] },
+                    translations: [{ languageCode: en, name: "E2E delivery" }]
+                }) { id }
+            }`);
+            shippingId = createShippingMethod.id;
+        }
+        const { paymentMethods } = await adminClient.query(gql`{ paymentMethods { items { id code } } }`);
+        if (!paymentMethods.items.some((m: any) => m.code === 'fp-e2e-pay')) {
+            await adminClient.query(gql`mutation {
+                createPaymentMethod(input: { code: "fp-e2e-pay", enabled: true, translations: [{ languageCode: en, name: "E2E card" }], handler: { code: "fp-e2e-pay", arguments: [] } }) { id }
+            }`);
+        }
+
+        // Guest checkout on a fresh session.
+        (shopClient as any).authToken = undefined;
+        const add = await shopClient.query(gql`mutation ($id: ID!) {
+            addItemToOrder(productVariantId: $id, quantity: 1) { ... on Order { id code } ... on ErrorResult { errorCode message } }
+        }`, { id: variantId });
+        if (!add.addItemToOrder.code) throw new Error(`addItemToOrder failed: ${JSON.stringify(add.addItemToOrder)}`);
+        const cust = await shopClient.query(gql`mutation ($email: String!) {
+            setCustomerForOrder(input: { emailAddress: $email, firstName: "Test", lastName: "Buyer" }) { ... on Order { id } ... on ErrorResult { errorCode message } }
+        }`, { email });
+        expect(cust.setCustomerForOrder.id).toBeTruthy();
+        await shopClient.query(gql`mutation {
+            setOrderShippingAddress(input: { fullName: "Test Buyer", streetLine1: "1 High St", city: "London", postalCode: "SW1A 1AA", countryCode: "GB" }) { ... on Order { id } ... on ErrorResult { errorCode message } }
+        }`);
+        const ship = await shopClient.query(gql`mutation ($id: [ID!]!) {
+            setOrderShippingMethod(shippingMethodId: $id) { ... on Order { id } ... on ErrorResult { errorCode message } }
+        }`, { id: [shippingId] });
+        expect(ship.setOrderShippingMethod.id).toBeTruthy();
+        const trans = await shopClient.query(gql`mutation {
+            transitionOrderToState(state: "ArrangingPayment") { ... on Order { id state } ... on ErrorResult { errorCode message } }
+        }`);
+        expect(trans.transitionOrderToState.state).toBe('ArrangingPayment');
+        const paid = await shopClient.query(gql`mutation {
+            addPaymentToOrder(input: { method: "fp-e2e-pay", metadata: {} }) { ... on Order { id code state totalWithTax } ... on ErrorResult { errorCode message } }
+        }`);
+        expect(paid.addPaymentToOrder.state).toBe('PaymentSettled');
+        return { id: paid.addPaymentToOrder.id, code: paid.addPaymentToOrder.code, total: paid.addPaymentToOrder.totalWithTax };
+    }
+
+    /** @vendure/testing encodes entity ids as "T_<n>" at the API
+     *  boundary; the plugin's tables store the raw numeric id. */
+    const num = (id: string | number) => Number(String(id).replace(/^T_/, ''));
+
+    async function adminOrder(id: string): Promise<any> {
+        await adminClient.asSuperAdmin();
+        const { order } = await adminClient.query(gql`query ($id: ID!) {
+            order(id: $id) { id code state active payments { id state amount refunds { id state total } } }
+        }`, { id });
+        return order;
+    }
+
+    async function waitForAssessment(orderId: string): Promise<boolean> {
+        for (let i = 0; i < 40; i++) {
+            if (await svc().isAssessed(num(orderId))) return true;
+            await new Promise(r => setTimeout(r, 250));
+        }
+        return false;
+    }
+
+    it('assesses every placed order and reports it through isAssessed / assessedOrderIds', async () => {
+        const o = await placeOrder('placed.one@example.com');
+        expect(await waitForAssessment(o.id)).toBe(true);
+        expect(await svc().assessedOrderIds([num(o.id), 987654321])).toEqual([num(o.id)]);
+        expect(await svc().isAssessed(987654321)).toBe(false);
+        expect(await svc().assessedOrderIds([])).toEqual([]);
+    });
+
+    it('rejecting a case cancels the order and refunds the settled payment in full', async () => {
+        const o = await placeOrder('reject.refund@example.com');
+        await waitForAssessment(o.id);
+        const input = { channelId: 1, email: 'reject.refund@example.com', ip: '203.0.113.70', orderValuePence: o.total, orderId: num(o.id), orderCode: o.code };
+        const a = await svc().assess({ ...input, dryRun: true });
+        const caseId = await svc().createCase(input as any, { ...a, level: 'review', action: 'review' });
+        expect((await svc().pendingOrderIds())).toContain(num(o.id));
+        expect((await svc().heldOrderIds())).toContain(num(o.id));
+
+        const r = await svc().resolveCase(caseId, 'rejected', 'stolen card');
+        expect(r.ok).toBe(true);
+        if (!r.cancelled) throw new Error(`not cancelled: ${JSON.stringify({ ...r, caseRow: undefined })}`);
+        expect(r.warnings).toEqual([]);
+        expect(r.refunds).toHaveLength(1);
+        expect(r.refunds![0].amount).toBe(o.total);
+
+        const after = await adminOrder(o.id);
+        expect(after.state).toBe('Cancelled');
+        expect(after.active).toBe(false);
+        expect(after.payments).toHaveLength(1);
+        expect(after.payments[0].refunds).toHaveLength(1);
+        expect(after.payments[0].refunds[0].total).toBe(o.total);
+        expect(after.payments[0].refunds[0].state).toBe('Settled');
+
+        // Closed cases leave pendingOrderIds but a rejected one stays held.
+        expect((await svc().pendingOrderIds())).not.toContain(num(o.id));
+        expect((await svc().heldOrderIds())).toContain(num(o.id));
+        // The audit row records what happened.
+        const log = await svc().log({ action: 'rejected' });
+        const row = log.find((l: any) => l.orderCode === o.code);
+        expect(row).toBeTruthy();
+        expect(row.reasons).toMatch(/order cancelled/);
+        expect(row.reasons).toMatch(/refunded/);
+        // A second decision on the same case is refused.
+        expect((await svc().resolveCase(caseId, 'rejected')).ok).toBe(false);
+    });
+
+    it('a per-case refund:false still cancels but leaves the payment alone', async () => {
+        const o = await placeOrder('reject.norefund@example.com');
+        await waitForAssessment(o.id);
+        const input = { channelId: 1, email: 'reject.norefund@example.com', orderValuePence: o.total, orderId: num(o.id), orderCode: o.code };
+        const a = await svc().assess({ ...input, dryRun: true });
+        const caseId = await svc().createCase(input as any, { ...a, level: 'review', action: 'review' });
+        const r = await svc().resolveCase(caseId, 'rejected', undefined, { refund: false });
+        expect(r.ok).toBe(true);
+        expect(r.cancelled).toBe(true);
+        expect(r.refunds).toEqual([]);
+        const after = await adminOrder(o.id);
+        expect(after.state).toBe('Cancelled');
+        expect(after.payments[0].refunds).toHaveLength(0);
+    });
+
+    it('cancel:false only closes the case and marks the order inactive', async () => {
+        const o = await placeOrder('reject.nocancel@example.com');
+        await waitForAssessment(o.id);
+        const input = { channelId: 1, email: 'reject.nocancel@example.com', orderValuePence: o.total, orderId: num(o.id), orderCode: o.code };
+        const a = await svc().assess({ ...input, dryRun: true });
+        const caseId = await svc().createCase(input as any, { ...a, level: 'review', action: 'review' });
+        const r = await svc().resolveCase(caseId, 'rejected', undefined, { cancel: false });
+        expect(r.ok).toBe(true);
+        expect(r.cancelled).toBeUndefined();
+        const after = await adminOrder(o.id);
+        expect(after.state).toBe('PaymentSettled');
+        expect(after.active).toBe(false);
+    });
+
+    it('rejecting a case whose order no longer exists still closes it, with a warning', async () => {
+        const input = { channelId: 1, email: 'ghost@example.com', orderValuePence: 1000, orderId: 987654322, orderCode: 'GHOST' };
+        const a = await svc().assess({ ...input, dryRun: true });
+        const caseId = await svc().createCase(input as any, { ...a, level: 'review', action: 'review' });
+        const r = await svc().resolveCase(caseId, 'rejected');
+        expect(r.ok).toBe(true);
+        expect(r.cancelled).toBe(false);
+        expect(r.warnings!.join(' ')).toMatch(/not found/);
+        expect((await svc().listCases('rejected')).map((c: any) => c.id)).toContain(caseId);
+    });
+
+    it('the reject endpoint reports the outcome and accepts per-case overrides (admin)', async () => {
+        const o = await placeOrder('reject.http@example.com');
+        await waitForAssessment(o.id);
+        const input = { channelId: 1, email: 'reject.http@example.com', orderValuePence: o.total, orderId: num(o.id), orderCode: o.code };
+        const a = await svc().assess({ ...input, dryRun: true });
+        const caseId = await svc().createCase(input as any, { ...a, level: 'review', action: 'review' });
+        await adminClient.asSuperAdmin();
+        const token = (adminClient as any).authToken as string;
+        const res = await fetch(`${BASE}/fraud-prevention/cases/${caseId}/reject`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({ notes: 'via http', notifyCustomer: false, blocklistIdentity: false, refund: false }),
+        });
+        expect([200, 201]).toContain(res.status);
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(body.cancelled).toBe(true);
+        expect(body.refunds).toEqual([]);
+        expect(body.blocklisted).toEqual([]);
+        expect((await adminOrder(o.id)).state).toBe('Cancelled');
     });
 });

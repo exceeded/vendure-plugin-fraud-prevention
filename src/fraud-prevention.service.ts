@@ -1,6 +1,16 @@
 import { LicenceStore, adapterFor, PurchaseClaimClient } from '@huloglobal/vendure-licence-sdk';
 import { Injectable, OnModuleInit } from '@nestjs/common';
-import { Logger, Order, Payment, PaymentMethod, RequestContext, TransactionalConnection } from '@vendure/core';
+import {
+    ID,
+    Logger,
+    Order,
+    OrderService,
+    Payment,
+    PaymentMethod,
+    RequestContext,
+    RequestContextService,
+    TransactionalConnection,
+} from '@vendure/core';
 import * as nodemailer from 'nodemailer';
 import * as https from 'https';
 import * as http from 'http';
@@ -17,7 +27,16 @@ import {
 } from './types';
 import { BUILTIN_DISPOSABLE_DOMAINS, FRAUD_SOURCES } from './fraud-sources';
 import { ipInCidr, normalizeEmail } from './net-util';
-import { AvsResult, avsFromMetadata, describeAvs, fetchStripeAvs, postcodesDiffer } from './avs';
+import {
+    CardChecks,
+    avsFromMetadata,
+    describeAvs,
+    describeRadar,
+    describeThreeDs,
+    fetchStripeCardChecks,
+    postcodesDiffer,
+    threeDsFailed,
+} from './avs';
 import { domainHasMx, lookupIpIntel, looksGibberish, IpIntel } from './ip-intel';
 import { DEFAULT_TEMPLATES, MessageKind, renderTemplate, renderBody } from './templates';
 import { fanOutOpsEvent, OpsEvent } from './ops-notify';
@@ -34,8 +53,9 @@ export interface AssessInput {
     /** Typed billing / shipping postcodes — compared when both present. */
     billingPostalCode?: string;
     shippingPostalCode?: string;
-    /** Card AVS verdicts from the gateway (see resolveAvsForOrder). */
-    avs?: AvsResult | null;
+    /** Card checks from the gateway — issuer AVS verdicts, Stripe Radar
+     *  risk level, 3-D Secure outcome (see resolveAvsForOrder). */
+    avs?: CardChecks | null;
     orderId?: number;
     orderCode?: string;
     /** True when this customer has at least one prior settled order. */
@@ -44,11 +64,30 @@ export interface AssessInput {
     dryRun?: boolean;
 }
 
+export interface ResolveCaseResult {
+    ok: boolean;
+    message: string;
+    caseRow?: any;
+    /** Reject only: the order was moved to `Cancelled` (or already was). */
+    cancelled?: boolean;
+    /** Reject only: the order's state after the decision. */
+    orderState?: string;
+    /** Reject only: refunds created, in minor units. */
+    refunds?: Array<{ paymentId: number; amount: number }>;
+    /** Reject only: Vendure-side steps that did not go through. The case
+     *  is still closed; an admin should finish these by hand. */
+    warnings?: string[];
+}
+
 @Injectable()
 export class FraudPreventionService implements OnModuleInit {
     private options: FraudPreventionPluginOptions = {};
 
-    constructor(private connection: TransactionalConnection) {}
+    constructor(
+        private connection: TransactionalConnection,
+        private orderService: OrderService,
+        private requestContextService: RequestContextService,
+    ) {}
 
     setOptions(opts: FraudPreventionPluginOptions) {
         this.options = opts;
@@ -522,6 +561,18 @@ export class FraudPreventionService implements OnModuleInit {
             if (input.avs.line1 === 'fail') {
                 push('avs_address_fail', 'Card AVS: street address mismatch', describeAvs('line1', input.avs));
             }
+            // 5h. Stripe Radar — the gateway's own ML verdict on the charge.
+            //     'normal' / 'not_assessed' are silent.
+            if (input.avs.riskLevel === 'highest') {
+                push('radar_risk_highest', 'Stripe Radar: highest risk', describeRadar(input.avs));
+            } else if (input.avs.riskLevel === 'elevated') {
+                push('radar_risk_elevated', 'Stripe Radar: elevated risk', describeRadar(input.avs));
+            }
+            // 5i. 3-D Secure ran and the cardholder failed to authenticate —
+            //     no liability shift. Gated by the channel's 3DS rule.
+            if (cfg.enforce3dSecure !== false && threeDsFailed(input.avs)) {
+                push('three_ds_failed', '3-D Secure failed', describeThreeDs(input.avs));
+            }
         }
 
         // 6. Order value.
@@ -565,7 +616,10 @@ export class FraudPreventionService implements OnModuleInit {
             }
         }
 
-        // 9. Failed payments from this IP.
+        // 9. Failed payments from this IP — Vendure Payment rows that ended
+        //    Declined/Error/Cancelled, plus (when the checkout-guard plugin
+        //    is installed) gateway failures and client-side declines it
+        //    recorded before any Payment row existed.
         if (input.ip) {
             const [fpRow] = await this.db.query(
                 `SELECT COUNT(*) AS cnt FROM payment p JOIN \`order\` o ON o.id = p.orderId
@@ -573,9 +627,12 @@ export class FraudPreventionService implements OnModuleInit {
                    AND p.createdAt > DATE_SUB(NOW(), INTERVAL 1 HOUR)`,
                 [input.ip],
             );
-            const cnt = Number(fpRow?.cnt || 0);
+            const vendureCnt = Number(fpRow?.cnt || 0);
+            const guardCnt = await this.countCheckoutGuardFailures(input.ip, 60);
+            const cnt = vendureCnt + guardCnt;
             if (cnt >= cfg.maxFailedPaymentsPerIpPerHour) {
-                push('failed_payments', 'Failed payments', `${cnt} failed payments from IP in the last hour`);
+                const via = guardCnt ? ` (${vendureCnt} payment records + ${guardCnt} gateway/client declines)` : '';
+                push('failed_payments', 'Failed payments', `${cnt} failed payments from IP in the last hour${via}`);
             }
         }
 
@@ -604,15 +661,16 @@ export class FraudPreventionService implements OnModuleInit {
     }
 
     /**
-     * Work out the card AVS verdict for a placed order. Order of trust:
+     * Work out the card checks (issuer AVS verdicts, Stripe Radar risk
+     * level, 3-D Secure outcome) for a placed order. Order of trust:
      *   1. host `avsResolver` option (any gateway),
      *   2. `Payment.metadata` on a settled/authorised payment,
      *   3. Stripe: fetch the PaymentIntent (expand latest_charge) with the
      *      payment method's own API key — only when the channel's
-     *      `avsLookup` is on.
+     *      `avsLookup` is on. One GET yields AVS, Radar and 3DS together.
      * Never throws; unknown → null → no signal.
      */
-    async resolveAvsForOrder(ctx: RequestContext, order: Order, cfg?: FraudChannelConfig): Promise<AvsResult | null> {
+    async resolveAvsForOrder(ctx: RequestContext, order: Order, cfg?: FraudChannelConfig): Promise<CardChecks | null> {
         try {
             let payments: Payment[] = Array.isArray(order.payments) && order.payments.length ? order.payments : [];
             if (!payments.length) {
@@ -627,7 +685,7 @@ export class FraudPreventionService implements OnModuleInit {
             if (this.options.avsResolver) {
                 try {
                     const r = await this.options.avsResolver({ ...order, payments: candidates } as any, ctx);
-                    if (r && (r.postalCode || r.line1)) return r;
+                    if (r && (r.postalCode || r.line1 || r.riskLevel || r.threeDsAuthenticated !== undefined)) return r;
                 } catch (e: any) {
                     Logger.warn(`avsResolver threw for ${order.code}: ${e.message}`, loggerCtx);
                 }
@@ -655,11 +713,11 @@ export class FraudPreventionService implements OnModuleInit {
                 if (!method || method.handler?.code !== 'stripe') continue;
                 const apiKey = method.handler.args?.find(a => a.name === 'apiKey')?.value;
                 if (!apiKey) continue;
-                const r = await fetchStripeAvs(String(apiKey), String(piId), {
-                    log: msg => Logger.warn(`AVS lookup for ${order.code}: ${msg}`, loggerCtx),
+                const r = await fetchStripeCardChecks(String(apiKey), String(piId), {
+                    log: msg => Logger.warn(`Card-check lookup for ${order.code}: ${msg}`, loggerCtx),
                 });
                 if (r) return r;
-                Logger.verbose(`No AVS checks on ${piId} for ${order.code} (non-card payment, or the storefront did not send the billing address to Stripe)`, loggerCtx);
+                Logger.verbose(`No card checks on ${piId} for ${order.code} (non-card payment, or the charge carries no AVS / Radar / 3DS data)`, loggerCtx);
             }
         } catch (e: any) {
             Logger.warn(`AVS resolution failed for ${order.code}: ${e.message}`, loggerCtx);
@@ -748,6 +806,46 @@ export class FraudPreventionService implements OnModuleInit {
         return rows.map((r: any) => Number(r.orderId));
     }
 
+    /** Order ids with a review case that is pending OR was rejected —
+     *  neither must ever be fulfilled. Hosts that gate on
+     *  `pendingOrderIds()` alone release a rejected order the moment the
+     *  case closes; use this set instead. */
+    async heldOrderIds(): Promise<number[]> {
+        const rows = await this.db.query(
+            `SELECT orderId FROM fraud_blocked_orders WHERE status IN ('pending', 'rejected') AND orderId IS NOT NULL`,
+        ).catch(() => []);
+        return rows.map((r: any) => Number(r.orderId));
+    }
+
+    /**
+     * True once the order guard has scored this order (a `fraud_log` row
+     * exists for it). The guard runs asynchronously after
+     * `OrderPlacedEvent`, so a fulfilment path that fires on the same
+     * event — or a cron that runs seconds later — can see an order that
+     * has not been assessed yet and therefore has no case to hold it.
+     * Gate on `isAssessed(orderId) && !pending` to close that race.
+     * Orders placed while the channel was `off` are still logged (shadow
+     * assessment), so this is true for every placed order once the guard
+     * has seen it.
+     */
+    async isAssessed(orderId: ID | number): Promise<boolean> {
+        const rows = await this.db.query(
+            `SELECT 1 AS present FROM fraud_log WHERE orderId = ? LIMIT 1`, [Number(orderId)],
+        ).catch(() => []);
+        return rows.length > 0;
+    }
+
+    /** Batch form of `isAssessed` for crons: the subset of `orderIds`
+     *  that have an assessment row. */
+    async assessedOrderIds(orderIds: Array<ID | number>): Promise<number[]> {
+        const ids = Array.from(new Set(orderIds.map(id => Number(id)).filter(n => Number.isFinite(n))));
+        if (!ids.length) return [];
+        const rows = await this.db.query(
+            `SELECT DISTINCT orderId FROM fraud_log WHERE orderId IN (${ids.map(() => '?').join(',')})`, ids,
+        ).catch(() => []);
+        return rows.map((r: any) => Number(r.orderId));
+    }
+
     /**
      * Review-queue listing. `signal` narrows to cases where a signal key
      * with that prefix fired — 'avs' = the card issuer's AVS verdict — by
@@ -771,7 +869,22 @@ export class FraudPreventionService implements OnModuleInit {
         ).catch(() => []);
     }
 
-    async resolveCase(id: number, decision: 'approved' | 'rejected', notes?: string): Promise<{ ok: boolean; message: string; caseRow?: any }> {
+    /**
+     * Close a review case. `rejected` also cancels the order through
+     * Vendure (`OrderService.cancelOrder`, so the state machine, history
+     * and every `OrderStateTransitionEvent` subscriber see it), voids
+     * Authorized payments (card holds, bank transfers) and — unless
+     * `refundOnReject` / `opts.refund` is false — refunds every settled
+     * payment in full via the handler's `createRefund`. The order is also
+     * marked inactive, as before. Vendure failures never block the case
+     * decision: they are reported in `warnings` and logged.
+     */
+    async resolveCase(
+        id: number,
+        decision: 'approved' | 'rejected',
+        notes?: string,
+        opts: { cancel?: boolean; refund?: boolean } = {},
+    ): Promise<ResolveCaseResult> {
         const rows = await this.db.query(`SELECT * FROM fraud_blocked_orders WHERE id = ?`, [id]);
         if (!rows.length) return { ok: false, message: 'Case not found' };
         const c = rows[0];
@@ -780,15 +893,163 @@ export class FraudPreventionService implements OnModuleInit {
             `UPDATE fraud_blocked_orders SET status = ?, reviewedAt = NOW(), reviewNotes = ? WHERE id = ?`,
             [decision, notes || null, id],
         );
+        const result: ResolveCaseResult = { ok: true, message: `Case ${decision}`, caseRow: c };
         if (decision === 'rejected' && c.orderId) {
+            const cancel = opts.cancel ?? this.options.cancelOnReject ?? true;
+            const refund = opts.refund ?? this.options.refundOnReject ?? true;
+            if (cancel) {
+                const outcome = await this.cancelRejectedOrder(Number(c.orderId), Number(c.channelId), refund,
+                    notes ? `Rejected by fraud review: ${notes}` : 'Rejected by fraud review');
+                result.cancelled = outcome.cancelled;
+                result.orderState = outcome.orderState;
+                result.refunds = outcome.refunds;
+                result.warnings = outcome.warnings;
+            }
             await this.db.query(`UPDATE \`order\` SET active = 0 WHERE id = ? AND active = 1`, [c.orderId]);
         }
         await this.db.query(
             `INSERT INTO fraud_log (channelId, orderId, orderCode, ip, email, riskScore, riskLevel, reasons, action, createdAt)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-            [c.channelId, c.orderId, c.orderCode, c.ip, c.email, c.riskScore, decision, notes || `${decision} by admin`, decision],
+            [c.channelId, c.orderId, c.orderCode, c.ip, c.email, c.riskScore, decision,
+                this.describeResolution(decision, notes, result), decision],
         );
-        return { ok: true, message: `Case ${decision}`, caseRow: c };
+        return result;
+    }
+
+    private describeResolution(decision: string, notes: string | undefined, r: ResolveCaseResult): string {
+        const parts = [notes || `${decision} by admin`];
+        if (r.cancelled) parts.push('order cancelled');
+        for (const rf of r.refunds || []) parts.push(`refunded ${(rf.amount / 100).toFixed(2)} on payment #${rf.paymentId}`);
+        for (const w of r.warnings || []) parts.push(`warning: ${w}`);
+        return parts.join('; ');
+    }
+
+    /** An admin RequestContext bound to the channel the order lives in,
+     *  so `OrderService.findOne` and friends can see it. */
+    private async adminContextForOrder(orderId: number, preferredChannelId?: number): Promise<RequestContext> {
+        let token: string | undefined;
+        const rows = await this.db.query(
+            `SELECT c.id, c.token FROM channel c JOIN order_channels_channel oc ON oc.channelId = c.id WHERE oc.orderId = ?`,
+            [orderId],
+        ).catch(() => []);
+        if (rows.length) {
+            const preferred = preferredChannelId ? rows.find((r: any) => Number(r.id) === Number(preferredChannelId)) : null;
+            token = (preferred || rows[0]).token;
+        }
+        if (!token && preferredChannelId) {
+            const [ch] = await this.db.query(`SELECT token FROM channel WHERE id = ?`, [preferredChannelId]).catch(() => []);
+            token = ch?.token;
+        }
+        return this.requestContextService.create({ apiType: 'admin', channelOrToken: token });
+    }
+
+    /**
+     * Cancel (and optionally refund) an order that failed fraud review.
+     * Order of operations: void Authorized payments first (holds must not
+     * capture), refund Settled payments (only valid while the order is
+     * in a paid state, so before the cancel), then cancel the order.
+     */
+    private async cancelRejectedOrder(orderId: number, channelId: number, refund: boolean, reason: string): Promise<{
+        cancelled: boolean; orderState?: string; refunds: Array<{ paymentId: number; amount: number }>; warnings: string[];
+    }> {
+        const refunds: Array<{ paymentId: number; amount: number }> = [];
+        const warnings: string[] = [];
+        let cancelled = false;
+        let orderState: string | undefined;
+        try {
+            const ctx = await this.adminContextForOrder(orderId, channelId);
+            const order = await this.orderService.findOne(ctx, orderId, ['payments', 'payments.refunds', 'lines']);
+            if (!order) {
+                warnings.push(`order #${orderId} not found in channel`);
+                return { cancelled, orderState, refunds, warnings };
+            }
+            orderState = order.state;
+            if (order.state === 'Cancelled') {
+                return { cancelled: true, orderState, refunds, warnings };
+            }
+
+            for (const p of order.payments || []) {
+                if (p.state !== 'Authorized') continue;
+                const r: any = await this.orderService.cancelPayment(ctx, p.id);
+                if (r && r.errorCode) warnings.push(`void payment #${p.id}: ${r.message || r.errorCode}`);
+            }
+
+            const refundable = order.state !== 'AddingItems' && order.state !== 'ArrangingPayment' && order.state !== 'PaymentAuthorized';
+            if (refund && refundable) {
+                for (const p of order.payments || []) {
+                    if (p.state !== 'Settled') continue;
+                    const already = (p.refunds || [])
+                        .filter(rf => rf.state !== 'Failed')
+                        .reduce((n, rf) => n + Number(rf.total || 0), 0);
+                    const amount = Number(p.amount) - already;
+                    if (amount <= 0) continue;
+                    // `amount` is the v2.2+ way to refund; `lines` / `shipping` /
+                    // `adjustment` are still written to the Refund row, so they
+                    // must be present (0) or strict-mode MySQL rejects the insert.
+                    const r: any = await this.orderService.refundOrder(ctx, {
+                        paymentId: p.id, amount, lines: [], shipping: 0, adjustment: 0, reason,
+                    });
+                    if (r && r.errorCode) warnings.push(`refund payment #${p.id}: ${r.message || r.errorCode}`);
+                    else refunds.push({ paymentId: Number(p.id), amount });
+                }
+            } else if (refund && !refundable && (order.payments || []).some(p => p.state === 'Settled')) {
+                warnings.push(`order in state ${order.state} cannot be refunded`);
+            }
+
+            const cancelResult: any = await this.orderService.cancelOrder(ctx, { orderId, reason });
+            if (cancelResult && cancelResult.errorCode) {
+                warnings.push(`cancel: ${cancelResult.message || cancelResult.errorCode}`);
+            } else {
+                cancelled = true;
+                orderState = cancelResult?.state || 'Cancelled';
+            }
+        } catch (e: any) {
+            warnings.push(`cancel/refund threw: ${e?.message || e}`);
+        }
+        for (const w of warnings) Logger.warn(`Fraud reject for order #${orderId}: ${w}`, loggerCtx);
+        return { cancelled, orderState, refunds, warnings };
+    }
+
+    /**
+     * Failed-payment rows recorded by @huloglobal/vendure-plugin-checkout-guard
+     * (`checkout_guard_payment_event`, kinds `failed` = gateway declined
+     * before a Vendure Payment existed, `client_declined` = the storefront
+     * reported a decline). Zero when that plugin is not installed; the
+     * table check is cached so an absent table costs one metadata query
+     * every ten minutes.
+     */
+    async countCheckoutGuardFailures(ip: string, windowMinutes = 60): Promise<number> {
+        if (!ip || !(await this.checkoutGuardTableExists())) return 0;
+        const mins = Math.max(1, Math.min(Math.floor(windowMinutes), 24 * 60));
+        const [row] = await this.db.query(
+            `SELECT COUNT(*) AS cnt FROM checkout_guard_payment_event
+             WHERE ip = ? AND kind IN ('failed', 'client_declined')
+               AND createdAt > DATE_SUB(NOW(), INTERVAL ${mins} MINUTE)`,
+            [ip],
+        ).catch(() => [{ cnt: 0 }]);
+        return Number(row?.cnt || 0);
+    }
+
+    private checkoutGuardTable: { exists: boolean; checkedAt: number } | null = null;
+
+    private async checkoutGuardTableExists(): Promise<boolean> {
+        const now = Date.now();
+        if (this.checkoutGuardTable && (this.checkoutGuardTable.exists || now - this.checkoutGuardTable.checkedAt < 10 * 60_000)) {
+            return this.checkoutGuardTable.exists;
+        }
+        let exists = false;
+        try {
+            const schemaExpr = this.db.dialect === 'postgres' ? 'current_schema()' : 'DATABASE()';
+            const rows = await this.db.query(
+                `SELECT 1 AS present FROM information_schema.tables
+                 WHERE table_schema = ${schemaExpr} AND table_name = 'checkout_guard_payment_event' LIMIT 1`,
+            );
+            exists = Array.isArray(rows) && rows.length > 0;
+        } catch {
+            exists = false;
+        }
+        this.checkoutGuardTable = { exists, checkedAt: now };
+        return exists;
     }
 
     // ── Stats for the Overview tab ─────────────────────────────────────

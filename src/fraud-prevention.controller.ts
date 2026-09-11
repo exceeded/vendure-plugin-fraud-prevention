@@ -4,6 +4,7 @@ import { Ctx, Permission, RequestContext } from '@vendure/core';
 import { RateLimiter, performSelfUpdate, selfUpdateEnv, evalInstanceId, describeLicence } from '@huloglobal/vendure-licence-sdk';
 
 import { FraudPreventionService } from './fraud-prevention.service';
+import { parseRiskLevel, parseThreeDsAuthenticated } from './avs';
 import { FraudPreventionPlugin } from './plugin';
 import { CUSTOM_FEED_PRESETS, FRAUD_SOURCES } from './fraud-sources';
 import { FraudChannelConfig } from './types';
@@ -266,10 +267,15 @@ export class FraudPreventionController {
     @Post('cases/:id/reject')
     async reject(
         @Ctx() ctx: RequestContext, @Res() res: Response, @Param('id') id: string,
-        @Body() body: { notes?: string; notifyCustomer?: boolean; blocklistIdentity?: boolean },
+        @Body() body: { notes?: string; notifyCustomer?: boolean; blocklistIdentity?: boolean; cancel?: boolean; refund?: boolean },
     ) {
         if (denyUnlessAdmin(ctx, res, true)) return;
-        const result = await this.service.resolveCase(Number(id), 'rejected', body?.notes);
+        // `cancel` / `refund` override the plugin's cancelOnReject /
+        // refundOnReject defaults for this one case.
+        const result = await this.service.resolveCase(Number(id), 'rejected', body?.notes, {
+            cancel: body?.cancel === undefined ? undefined : !!body.cancel,
+            refund: body?.refund === undefined ? undefined : !!body.refund,
+        });
         if (result.ok && result.caseRow) {
             const notif = await this.service.getNotificationConfig();
             const notify = body?.notifyCustomer !== undefined ? !!body.notifyCustomer : !!notif.notifyOnRejection;
@@ -284,10 +290,15 @@ export class FraudPreventionController {
             if (doBlock) {
                 blocked = await this.service.blocklistCaseIdentity(result.caseRow, Number(id));
             }
+            const refunded = (result.refunds || []).reduce((n, r) => n + r.amount, 0);
+            const outcome = result.cancelled
+                ? ` cancelled${refunded ? ` and refunded ${(refunded / 100).toFixed(2)}` : ''}`
+                : ' (not cancelled — see warnings)';
             await this.service.notifyOps({
                 event: 'case.rejected',
-                text: `🚫 Fraud case rejected — order ${result.caseRow.orderCode || ''} cancelled` +
-                    `${notify ? '' : ' (customer not notified)'}${blocked.length ? ` — identity blocklisted (${blocked.join(', ')})` : ''}`,
+                text: `🚫 Fraud case rejected — order ${result.caseRow.orderCode || ''}${outcome}` +
+                    `${notify ? '' : ' (customer not notified)'}${blocked.length ? ` — identity blocklisted (${blocked.join(', ')})` : ''}` +
+                    `${result.warnings?.length ? ` — warnings: ${result.warnings.join('; ')}` : ''}`,
                 orderCode: result.caseRow.orderCode,
             });
             return res.json({ ...result, blocklisted: blocked });
@@ -308,8 +319,14 @@ export class FraudPreventionController {
             shippingCountryCode: body.shippingCountryCode || undefined,
             billingPostalCode: body.billingPostalCode || undefined,
             shippingPostalCode: body.shippingPostalCode || undefined,
-            avs: (body.avsPostalCode || body.avsLine1)
-                ? { postalCode: body.avsPostalCode || undefined, line1: body.avsLine1 || undefined, source: 'simulated' }
+            avs: (body.avsPostalCode || body.avsLine1 || body.radarRiskLevel || body.threeDsAuthenticated !== undefined)
+                ? {
+                    postalCode: body.avsPostalCode || undefined,
+                    line1: body.avsLine1 || undefined,
+                    riskLevel: parseRiskLevel(body.radarRiskLevel) || undefined,
+                    threeDsAuthenticated: parseThreeDsAuthenticated(body.threeDsAuthenticated) ?? undefined,
+                    source: 'simulated',
+                }
                 : undefined,
             isReturningCustomer: body.isReturningCustomer,
             dryRun: true,

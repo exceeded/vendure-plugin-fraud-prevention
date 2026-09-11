@@ -2,11 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
     avsFromMetadata,
     avsFromStripeCharge,
+    cardChecksFromStripeCharge,
     describeAvs,
+    describeRadar,
+    describeThreeDs,
     fetchStripeAvs,
+    fetchStripeCardChecks,
     normalisePostcode,
     parseAvsCheck,
+    parseRiskLevel,
+    parseThreeDsAuthenticated,
     postcodesDiffer,
+    threeDsFailed,
 } from './avs';
 
 describe('normalisePostcode / postcodesDiffer', () => {
@@ -154,6 +161,123 @@ describe('fetchStripeAvs', () => {
     it('never calls the network for a non-card charge and returns null', async () => {
         const fetchImpl = async () => okResponse({ id: 'pi_1', latest_charge: { payment_method_details: { paypal: {} } } });
         expect(await fetchStripeAvs('sk', 'pi_1', { fetchImpl })).toBeNull();
+    });
+});
+
+describe('parseRiskLevel / parseThreeDsAuthenticated', () => {
+    it('maps Radar vocabulary and common spellings', () => {
+        expect(parseRiskLevel('normal')).toBe('normal');
+        expect(parseRiskLevel('Elevated')).toBe('elevated');
+        expect(parseRiskLevel('HIGHEST')).toBe('highest');
+        expect(parseRiskLevel('not_assessed')).toBe('not_assessed');
+        expect(parseRiskLevel('not assessed')).toBe('not_assessed');
+        expect(parseRiskLevel('high')).toBe('highest');
+        expect(parseRiskLevel('unknown')).toBe('unknown');
+        expect(parseRiskLevel(null)).toBeNull();
+        expect(parseRiskLevel('')).toBeNull();
+        expect(parseRiskLevel('banana')).toBeNull();
+    });
+    it('reads the 3DS authenticated flag from booleans and strings', () => {
+        expect(parseThreeDsAuthenticated(true)).toBe(true);
+        expect(parseThreeDsAuthenticated(false)).toBe(false);
+        expect(parseThreeDsAuthenticated('false')).toBe(false);
+        expect(parseThreeDsAuthenticated('authenticated')).toBe(true);
+        expect(parseThreeDsAuthenticated(undefined)).toBeNull();
+        expect(parseThreeDsAuthenticated('maybe')).toBeNull();
+    });
+});
+
+describe('threeDsFailed', () => {
+    it('is true only when 3DS ran and did not authenticate', () => {
+        expect(threeDsFailed({ threeDsAuthenticated: false })).toBe(true);
+        expect(threeDsFailed({ threeDsAuthenticated: false, threeDsResult: 'failed' })).toBe(true);
+        expect(threeDsFailed({ threeDsAuthenticated: false, threeDsResult: 'processing_error' })).toBe(true);
+        expect(threeDsFailed({ threeDsAuthenticated: true })).toBe(false);
+        expect(threeDsFailed({})).toBe(false);
+        expect(threeDsFailed(null)).toBe(false);
+        expect(threeDsFailed(undefined)).toBe(false);
+    });
+    it('treats attempt-acknowledged, exempted and not-enrolled cards as benign', () => {
+        expect(threeDsFailed({ threeDsAuthenticated: false, threeDsResult: 'attempt_acknowledged' })).toBe(false);
+        expect(threeDsFailed({ threeDsAuthenticated: false, threeDsResult: 'exempted' })).toBe(false);
+        expect(threeDsFailed({ threeDsAuthenticated: false, threeDsResult: 'not_supported' })).toBe(false);
+    });
+});
+
+describe('cardChecksFromStripeCharge (Radar + 3DS)', () => {
+    it('is the same function as avsFromStripeCharge', () => {
+        expect(cardChecksFromStripeCharge).toBe(avsFromStripeCharge);
+        expect(fetchStripeCardChecks).toBe(fetchStripeAvs);
+    });
+    it('reads outcome.risk_level and risk_score alongside the AVS checks', () => {
+        const r = cardChecksFromStripeCharge({
+            outcome: { network_status: 'approved_by_network', risk_level: 'elevated', risk_score: 71, type: 'authorized' },
+            payment_method_details: { card: { checks: { address_postal_code_check: 'pass', address_line1_check: null } } },
+        });
+        expect(r).toEqual({ source: 'stripe', postalCode: 'pass', riskLevel: 'elevated', riskScore: 71 });
+    });
+    it('returns Radar / 3DS verdicts even when no AVS check ran (wallet payments)', () => {
+        const r = cardChecksFromStripeCharge({
+            outcome: { risk_level: 'highest' },
+            payment_method_details: { card: { checks: { address_postal_code_check: null, address_line1_check: null }, wallet: { type: 'apple_pay' } } },
+        });
+        expect(r).toEqual({ source: 'stripe', riskLevel: 'highest' });
+        const tds = cardChecksFromStripeCharge({
+            payment_method_details: { card: { three_d_secure: { authenticated: false, succeeded: false, result: 'failed', version: '2.2.0' } } },
+        });
+        expect(tds).toEqual({ source: 'stripe', threeDsAuthenticated: false, threeDsResult: 'failed' });
+        expect(threeDsFailed(tds)).toBe(true);
+    });
+    it('ignores an unrecognised risk level and a missing risk score', () => {
+        const r = cardChecksFromStripeCharge({
+            outcome: { risk_level: 'banana' },
+            payment_method_details: { card: { checks: { address_line1_check: 'fail' } } },
+        });
+        expect(r).toEqual({ source: 'stripe', line1: 'fail' });
+    });
+    it('still returns null when nothing at all was checked', () => {
+        expect(cardChecksFromStripeCharge({ outcome: { network_status: 'approved_by_network' }, payment_method_details: { card: {} } })).toBeNull();
+        expect(cardChecksFromStripeCharge({ payment_method_details: { paypal: {} }, outcome: {} })).toBeNull();
+    });
+});
+
+describe('avsFromMetadata (Radar + 3DS)', () => {
+    it('reads riskLevel / threeDs from the canonical avs object and flat keys', () => {
+        expect(avsFromMetadata({ avs: { postalCode: 'fail', riskLevel: 'highest', threeDsAuthenticated: false, threeDsResult: 'failed', source: 'adyen' } }))
+            .toEqual({ source: 'adyen', postalCode: 'fail', riskLevel: 'highest', threeDsAuthenticated: false, threeDsResult: 'failed' });
+        expect(avsFromMetadata({ radarRiskLevel: 'elevated' })).toEqual({ source: 'payment metadata', riskLevel: 'elevated' });
+        expect(avsFromMetadata({ outcome: { risk_level: 'normal', risk_score: 12 }, three_d_secure: { authenticated: true } }))
+            .toEqual({ source: 'payment metadata', riskLevel: 'normal', riskScore: 12, threeDsAuthenticated: true });
+        expect(avsFromMetadata({ card: { threeDsAuthenticated: 'false' } }))
+            .toEqual({ source: 'payment metadata', threeDsAuthenticated: false });
+    });
+});
+
+describe('fetchStripeCardChecks', () => {
+    it('returns Radar and 3DS data from the expanded charge', async () => {
+        const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({
+            id: 'pi_1',
+            latest_charge: {
+                outcome: { risk_level: 'highest', risk_score: 93 },
+                payment_method_details: { card: { checks: { address_postal_code_check: 'fail' }, three_d_secure: { authenticated: false, result: 'failed' } } },
+            },
+        }) });
+        expect(await fetchStripeCardChecks('sk', 'pi_1', { fetchImpl })).toEqual({
+            source: 'stripe', postalCode: 'fail', riskLevel: 'highest', riskScore: 93, threeDsAuthenticated: false, threeDsResult: 'failed',
+        });
+    });
+});
+
+describe('describeRadar / describeThreeDs', () => {
+    it('names the verdict, the score and the source', () => {
+        expect(describeRadar({ riskLevel: 'highest', riskScore: 93, source: 'stripe' }))
+            .toBe('Stripe Radar rated this charge "highest", risk score 93 (stripe)');
+        expect(describeRadar({ riskLevel: 'elevated' }))
+            .toBe('Stripe Radar rated this charge "elevated"');
+        expect(describeThreeDs({ threeDsAuthenticated: false, threeDsResult: 'failed', source: 'stripe' }))
+            .toBe('3-D Secure ran but the cardholder did not authenticate — result "failed"; liability did not shift to the issuer (stripe)');
+        expect(describeThreeDs({ threeDsAuthenticated: false }))
+            .toBe('3-D Secure ran but the cardholder did not authenticate; liability did not shift to the issuer');
     });
 });
 

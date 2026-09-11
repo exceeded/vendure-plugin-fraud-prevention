@@ -37,7 +37,7 @@ import { CustomDetailComponent, SharedModule } from '@vendure/admin-ui/core';
                 {{ showSignals ? 'Hide' : 'Show' }} {{ data.signals.length }} signal{{ data.signals.length === 1 ? '' : 's' }}
             </button>
             <ul class="signal-list" *ngIf="showSignals">
-                <li *ngFor="let s of data.signals" [class.avs]="s.key?.startsWith('avs_')">
+                <li *ngFor="let s of data.signals" [class.avs]="isCardSignal(s)">
                     <span class="sig-label">{{ s.label }}</span>
                     <span class="sig-detail">{{ s.detail }}</span>
                     <span class="sig-pts" *ngIf="s.points != null">+{{ s.points }}</span>
@@ -93,6 +93,12 @@ export class OrderFraudPanelComponent implements CustomDetailComponent, OnInit, 
     data: any = null;
     paid = false;
     showSignals = false;
+
+    /** Verdicts from the card network / gateway (AVS, Stripe Radar, 3DS)
+     *  are highlighted — they did not come from what the customer typed. */
+    isCardSignal(s: { key?: string }): boolean {
+        return typeof s?.key === 'string' && (s.key.startsWith('avs_') || s.key.startsWith('radar_') || s.key === 'three_ds_failed');
+    }
     private sub: Subscription | null = null;
     private loadedForId: string | null = null;
 
