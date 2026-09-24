@@ -1,6 +1,7 @@
 import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
 import { EventBus, Logger, OrderPlacedEvent, ProcessContext } from '@vendure/core';
 import { FraudPreventionService, AssessInput } from './fraud-prevention.service';
+import { normaliseIp } from './net-util';
 
 const loggerCtx = 'FraudPrevention';
 
@@ -28,13 +29,24 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
 
     onApplicationBootstrap() {
         if (!this.processContext.isServer) return;
-        this.eventBus.ofType(OrderPlacedEvent).subscribe(async event => {
+        // At most a few assessments in flight: a burst of orders must not become a burst of
+        // external lookups and database round trips all at once.
+        const MAX_CONCURRENT = 6;
+        let running = 0;
+        const queue: Array<() => void> = [];
+        const run = async (event: OrderPlacedEvent) => {
+            if (running >= MAX_CONCURRENT) await new Promise<void>(resolve => queue.push(resolve));
+            running++;
             try {
                 await this.handleOrderPlaced(event);
             } catch (e: any) {
                 Logger.error(`Order assessment failed for ${event.order?.code}: ${e.message}`, loggerCtx);
+            } finally {
+                running--;
+                queue.shift()?.();
             }
-        });
+        };
+        this.eventBus.ofType(OrderPlacedEvent).subscribe(event => { void run(event); });
     }
 
     private async handleOrderPlaced(event: OrderPlacedEvent) {
@@ -44,7 +56,7 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
 
         const input: AssessInput = {
             channelId,
-            ip: (order.customFields as any)?.ip || undefined,
+            ip: normaliseIp((order.customFields as any)?.ip) || undefined,
             email,
             orderValuePence: order.subTotalWithTax || 0,
             countryCode: order.billingAddress?.countryCode || order.shippingAddress?.countryCode || undefined,
@@ -60,6 +72,12 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
         };
 
         const assessment = await this.service.assess(input);
+
+        // In enforce mode the review case is written BEFORE the assessment log: the host
+        // fulfilment gate treats "assessed and no case" as releasable, so the case must exist
+        // first or a fulfilment run in that gap could release keys for an order about to be held.
+        const held = assessment.protectionActive !== false && (assessment.action === 'review' || assessment.action === 'block');
+        const caseId = held ? await this.service.createCase(input, assessment) : 0;
 
         // Always log — shadow assessments included, so the score history
         // has no blind spots even while protection is switched off.
@@ -85,7 +103,7 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
                 });
                 const notif = await this.service.getNotificationConfig();
                 if (notif.notifyOnHighRisk) {
-                    await this.service.sendAdminAlert(
+                    void this.service.sendAdminAlert(
                         `Protection inactive: order ${order.code} scored ${assessment.score}/100`,
                         `<h2>⚠️ Fraud protection scored this order — but is switched OFF</h2>
                          <p><strong>Order:</strong> ${order.code}</p>
@@ -111,8 +129,7 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
             return;
         }
 
-        // enforce mode, review or block
-        const caseId = await this.service.createCase(input, assessment);
+        // enforce mode, review or block (case already created above)
         Logger.warn(
             `Order ${order.code} held for review (case #${caseId}, score ${assessment.score}, action ${assessment.action})`,
             loggerCtx,
@@ -133,7 +150,7 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
         const wantAdminMail = assessment.action === 'block' ? notif.notifyOnBlocked : notif.notifyOnHighRisk;
         if (wantAdminMail) {
             const base = this.service.getOptions().publicBaseUrl || '';
-            await this.service.sendAdminAlert(
+            void this.service.sendAdminAlert(
                 `Order ${order.code} held for review (score ${assessment.score})`,
                 `<h2>${assessment.action === 'block' ? '🚫 High-risk order held' : '⚠️ Order held for review'}</h2>
                  <p><strong>Order:</strong> ${order.code}</p>
@@ -150,7 +167,7 @@ export class FraudOrderGuard implements OnApplicationBootstrap {
         const policy = (cfg as any).notifyCustomerOnHold || 'block';
         const shouldTell = policy === 'always' || (policy === 'block' && assessment.action === 'block');
         if (shouldTell && email) {
-            await this.service.sendCustomerTemplate(channelId, 'held', email, {
+            void this.service.sendCustomerTemplate(channelId, 'held', email, {
                 orderCode: order.code,
                 firstName: (order.customer as any)?.firstName || undefined,
             });

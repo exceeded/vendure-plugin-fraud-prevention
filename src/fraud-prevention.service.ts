@@ -1,4 +1,5 @@
 import { LicenceStore, adapterFor, PurchaseClaimClient } from '@huloglobal/vendure-licence-sdk';
+import { createHash } from 'crypto';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import {
     ID,
@@ -26,7 +27,7 @@ import {
     RiskLevel,
 } from './types';
 import { BUILTIN_DISPOSABLE_DOMAINS, FRAUD_SOURCES } from './fraud-sources';
-import { ipInCidr, normalizeEmail } from './net-util';
+import { ipInCidr, normalizeEmail, normaliseIp } from './net-util';
 import {
     CardChecks,
     avsFromMetadata,
@@ -192,6 +193,9 @@ export class FraudPreventionService implements OnModuleInit {
         await this.db.query(`ALTER TABLE fraud_log ADD COLUMN IF NOT EXISTS signals TEXT`);
         await this.db.query(`ALTER TABLE fraud_log ADD COLUMN IF NOT EXISTS orderCode VARCHAR(32) NULL`);
         await this.db.query(`ALTER TABLE fraud_log ADD INDEX IF NOT EXISTS idx_fraud_log_created (createdAt)`);
+        // The host fulfilment gate and the order panel look assessments up by order.
+        await this.db.query(`ALTER TABLE fraud_log ADD INDEX IF NOT EXISTS idx_fraud_log_order (orderId)`).catch(() => undefined);
+        await this.db.query(`ALTER TABLE fraud_blocked_orders ADD INDEX IF NOT EXISTS idx_fraud_cases_order (orderId, status)`).catch(() => undefined);
         await this.db.query(`ALTER TABLE fraud_log ADD INDEX IF NOT EXISTS idx_fraud_log_channel (channelId, createdAt)`);
 
         await this.db.query(`
@@ -223,6 +227,16 @@ export class FraudPreventionService implements OnModuleInit {
                 createdAt DATETIME,
                 updatedAt DATETIME,
                 INDEX idx_bl_type_value (listType, value)
+            )`);
+        // Feed replacement deletes by source: without this index the DELETE scanned and
+        // locked the whole table and deadlocked against the hot path most nights.
+        await this.db.query(`ALTER TABLE fraud_blocklist ADD INDEX IF NOT EXISTS idx_bl_source (source)`).catch(() => undefined);
+        await this.db.query(`
+            CREATE TABLE IF NOT EXISTS fraud_feed_state (
+                source VARCHAR(100) PRIMARY KEY,
+                contentHash VARCHAR(64),
+                entries INT DEFAULT 0,
+                syncedAt DATETIME
             )`);
         await this.db.query(`
             CREATE TABLE IF NOT EXISTS fraud_whitelist (
@@ -330,13 +344,36 @@ export class FraudPreventionService implements OnModuleInit {
         });
     }
 
+    /** Small in-process memo for read-mostly rows (config, notification settings, stats). */
+    private memo = new Map<string, { at: number; value: any }>();
+    private async cached<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
+        const hit = this.memo.get(key);
+        if (hit && Date.now() - hit.at < ttlMs) return hit.value as T;
+        const value = await fn();
+        this.memo.set(key, { at: Date.now(), value });
+        return value;
+    }
+    private forget(prefix: string) { for (const k of this.memo.keys()) if (k.startsWith(prefix)) this.memo.delete(k); }
+
     async getConfig(channelId: number): Promise<FraudChannelConfig> {
-        const rows = await this.db.query(`SELECT * FROM fraud_config WHERE channelId = ?`, [channelId]).catch(() => []);
-        if (rows.length) return this.rowToConfig(rows[0]);
-        return { ...DEFAULT_CONFIG, channelId };
+        return this.cached(`config:${channelId}`, 30_000, async () => {
+            const rows = await this.db.query(`SELECT * FROM fraud_config WHERE channelId = ?`, [channelId]).catch(() => []);
+            if (rows.length) return this.rowToConfig(rows[0]);
+            return { ...DEFAULT_CONFIG, channelId };
+        });
     }
 
     async saveConfig(c: FraudChannelConfig): Promise<void> {
+        // Bounds: thresholds are percentages and review must not sit above block.
+        const num = (v: any, d: number, lo = 0, hi = 1_000_000_000) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+        c.reviewThreshold = num(c.reviewThreshold, DEFAULT_CONFIG.reviewThreshold, 0, 100);
+        c.blockThreshold = num(c.blockThreshold, DEFAULT_CONFIG.blockThreshold, 0, 100);
+        if (c.reviewThreshold > c.blockThreshold) c.reviewThreshold = c.blockThreshold;
+        for (const k of ['maxOrdersPerIpPerHour', 'maxOrdersPerIpPerDay', 'maxOrdersPerEmailPerDay', 'maxDailyValuePerEmailPence', 'maxOrderValuePence', 'requireEmailVerificationAbovePence', 'maxFailedPaymentsPerIpPerHour', 'cooldownMinutesAfterFailedPayment', 'autoApproveAfterHours'] as const) {
+            (c as any)[k] = num((c as any)[k], (DEFAULT_CONFIG as any)[k] ?? 0);
+        }
+        if (!['off', 'monitor', 'enforce'].includes(String(c.mode))) c.mode = DEFAULT_CONFIG.mode;
+        this.forget('config:'); this.forget('stats:');
         await this.db.query(
             `INSERT INTO fraud_config (channelId, enabled, mode, reviewThreshold, blockThreshold, holdFulfilment,
                 maxOrdersPerIpPerHour, maxOrdersPerIpPerDay, maxOrdersPerEmailPerDay, maxDailyValuePerEmailPence,
@@ -390,6 +427,12 @@ export class FraudPreventionService implements OnModuleInit {
         const protectionOff = !cfg.enabled || cfg.mode === 'off';
 
         const norm = input.email ? normalizeEmail(input.email) : null;
+        if (input.ip) input.ip = normaliseIp(input.ip);
+
+        // The two network lookups start now and are awaited where their signals are scored,
+        // so they overlap each other and every database signal instead of running in series.
+        const intelP: Promise<IpIntel> | null = input.ip ? this.getIpIntel(input.ip).catch(() => ({ ip: input.ip!, countryCode: null, isVpnOrProxy: false, isHosting: false, resolved: false })) : null;
+        const mxP: Promise<boolean | null> | null = norm ? domainHasMx(norm.domain).catch(() => null) : null;
 
         // 0. Allowlist — trusted identities bypass everything.
         if (await this.isAllowlisted(norm?.email, norm?.domain, input.ip)) {
@@ -400,8 +443,8 @@ export class FraudPreventionService implements OnModuleInit {
         if (norm) {
             const hits = await this.db.query(
                 `SELECT listType, source, value FROM fraud_blocklist
-                 WHERE (listType = 'email' AND value = ?) OR (listType = 'email_domain' AND value = ?) LIMIT 3`,
-                [norm.email, norm.domain],
+                 WHERE (listType = 'email' AND value IN (?, ?)) OR (listType = 'email_domain' AND value = ?) LIMIT 3`,
+                [norm.email, norm.canonical, norm.domain],
             ).catch(() => []);
             for (const h of hits) {
                 push(h.listType === 'email' ? 'blocklist_email' : 'blocklist_email_domain',
@@ -476,7 +519,7 @@ export class FraudPreventionService implements OnModuleInit {
             const [emailRow] = await this.db.query(
                 `SELECT COUNT(*) AS cnt, COALESCE(SUM(o.subTotalWithTax), 0) AS totalValue
                  FROM \`order\` o JOIN customer c ON c.id = o.customerId
-                 WHERE LOWER(c.emailAddress) IN (${like.map(() => '?').join(',')})
+                 WHERE c.emailAddress IN (${like.map(() => '?').join(',')})
                    AND o.orderPlacedAt > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
                 like,
             );
@@ -508,8 +551,8 @@ export class FraudPreventionService implements OnModuleInit {
 
         // 5c. IP intelligence — VPN/proxy/hosting + geo vs billing country.
         //     Cached 30 days in fraud_ip_intel; lookups fail open.
-        if (input.ip) {
-            const intel = await this.getIpIntel(input.ip);
+        if (input.ip && intelP) {
+            const intel = await intelP;
             if (intel.resolved) {
                 if (cfg.blockVpnProxy && intel.isVpnOrProxy) {
                     push('vpn_proxy', 'VPN / proxy IP', input.ip);
@@ -527,7 +570,7 @@ export class FraudPreventionService implements OnModuleInit {
 
         // 5d. Email deliverability + shape.
         if (norm) {
-            const hasMx = await domainHasMx(norm.domain);
+            const hasMx = mxP ? await mxP : null;
             if (hasMx === false) {
                 push('email_no_mx', 'Email domain has no MX records', `${norm.domain} cannot receive mail`);
             }
@@ -592,7 +635,7 @@ export class FraudPreventionService implements OnModuleInit {
             const like = norm.canonical === norm.email ? [norm.email] : [norm.email, norm.canonical];
             const [histRow] = await this.db.query(
                 `SELECT COUNT(*) AS n FROM \`order\` o JOIN customer c ON c.id = o.customerId
-                 WHERE LOWER(c.emailAddress) IN (${like.map(() => '?').join(',')})
+                 WHERE c.emailAddress IN (${like.map(() => '?').join(',')})
                    AND o.state IN ('PaymentSettled', 'Delivered')
                    AND (o.id <> ? OR ? IS NULL)`,
                 [...like, input.orderId || null, input.orderId || null],
@@ -783,6 +826,12 @@ export class FraudPreventionService implements OnModuleInit {
     }
 
     async createCase(input: AssessInput, a: FraudAssessment): Promise<number> {
+        if (input.orderId) {
+            const [open] = await this.db.query(
+                `SELECT id FROM fraud_blocked_orders WHERE orderId = ? AND status = 'pending' LIMIT 1`, [Number(input.orderId)],
+            ).catch(() => []);
+            if (open?.id) return Number(open.id);
+        }
         const res = await this.db.query(
             `INSERT INTO fraud_blocked_orders (orderId, orderCode, channelId, ip, email, riskScore, riskLevel, reasons, signals, status, createdAt)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())`,
@@ -1054,7 +1103,11 @@ export class FraudPreventionService implements OnModuleInit {
 
     // ── Stats for the Overview tab ─────────────────────────────────────
     async stats(days = 7): Promise<any> {
-        const d = Math.max(1, Math.min(days, 90));
+        const d = Math.max(1, Math.min(Number(days) || 7, 90));
+        return this.cached(`stats:${d}`, 30_000, () => this.computeStats(d));
+    }
+
+    private async computeStats(d: number): Promise<any> {
         const [totals] = await this.db.query(
             `SELECT COUNT(*) AS assessed,
                     SUM(riskLevel IN ('review','blocked')) AS flagged,
@@ -1122,12 +1175,16 @@ export class FraudPreventionService implements OnModuleInit {
 
     async pruneLog(retentionDays: number): Promise<number> {
         if (!retentionDays || retentionDays <= 0) return 0;
-        const res = await this.db.query(
-            `DELETE FROM fraud_log WHERE createdAt < DATE_SUB(NOW(), INTERVAL ? DAY)`,
-            [retentionDays],
-            { needAffected: true },
-        );
-        return res.affectedRows || 0;
+        // Chunked so a big backlog never holds one long lock on a table the hot path reads.
+        let removed = 0;
+        for (;;) {
+            const rows: any[] = await this.db.query(
+                `SELECT id FROM fraud_log WHERE createdAt < DATE_SUB(NOW(), INTERVAL ? DAY) ORDER BY id LIMIT 5000`, [retentionDays]);
+            if (!rows.length) return removed;
+            const ids = rows.map(r => Number(r.id));
+            await this.db.query(`DELETE FROM fraud_log WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+            removed += ids.length;
+        }
     }
 
     // ── Lists ──────────────────────────────────────────────────────────
@@ -1140,8 +1197,13 @@ export class FraudPreventionService implements OnModuleInit {
     }
 
     async addEntry(list: 'whitelist' | 'blocklist', type: string, value: string, note?: string): Promise<void> {
-        const v = value.trim().toLowerCase();
+        let v = String(value || '').trim().toLowerCase();
         if (!v) throw new Error('Empty value');
+        if (!['ip', 'ip_range', 'email', 'email_domain'].includes(type)) throw new Error('Unknown list type');
+        if (type === 'ip') v = normaliseIp(v);
+        if (type === 'ip_range' && !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(v)) throw new Error('Ranges must be IPv4 CIDR, e.g. 203.0.113.0/24');
+        if (type === 'email') { const n = normalizeEmail(v); if (!n) throw new Error('Not an email address'); v = n.canonical || n.email; }
+        if (type === 'email_domain' && !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)) throw new Error('Not a domain');
         if (list === 'whitelist') {
             await this.db.query(
                 `INSERT INTO fraud_whitelist (type, value, note, createdAt) VALUES (?, ?, ?, NOW())`,
@@ -1192,30 +1254,103 @@ export class FraudPreventionService implements OnModuleInit {
         }
     }
 
-    /** Parse a line-based feed and replace this source's blocklist rows. */
+    /** Retry a statement a few times when InnoDB / Postgres reports a deadlock or lock timeout. */
+    private async withLockRetry<T>(fn: () => Promise<T>, what: string): Promise<T> {
+        let last: any;
+        for (let attempt = 1; attempt <= 4; attempt++) {
+            try { return await fn(); } catch (e: any) {
+                const code = String(e?.code || e?.errno || '');
+                const msg = String(e?.message || '');
+                const retryable = code === 'ER_LOCK_DEADLOCK' || code === 'ER_LOCK_WAIT_TIMEOUT' || code === '40P01' || code === '1213' || code === '1205' || /deadlock|lock wait timeout/i.test(msg);
+                if (!retryable || attempt === 4) throw e;
+                last = e;
+                Logger.warn(`${what}: ${msg.slice(0, 80)} — retry ${attempt}/3`, loggerCtx);
+                await new Promise(r => setTimeout(r, 250 * attempt * attempt));
+            }
+        }
+        throw last;
+    }
+
+    /** Delete rows by source in id-chunks (portable, short locks). */
+    private async deleteSourceRows(source: string): Promise<number> {
+        let removed = 0;
+        for (;;) {
+            const rows: any[] = await this.db.query(`SELECT id FROM fraud_blocklist WHERE source = ? ORDER BY id LIMIT 2000`, [source]);
+            if (!rows.length) return removed;
+            const ids = rows.map(r => Number(r.id));
+            await this.withLockRetry(() => this.db.query(`DELETE FROM fraud_blocklist WHERE id IN (${ids.map(() => '?').join(',')})`, ids), `delete ${source}`);
+            removed += ids.length;
+        }
+    }
+
+    /**
+     * Parse a line-based feed and replace this source's blocklist rows.
+     * Unchanged feeds (same content hash as last time) are skipped entirely;
+     * changed feeds are loaded under a staging source key first and swapped
+     * in afterwards, so the live rows are never absent and every statement is
+     * small enough not to block the order-scoring reads.
+     */
     private async parseAndStore(sourceKey: string, type: string, data: string): Promise<number> {
-        const lines = data.split('\n')
-            .map(l => l.trim())
-            // Spamhaus DROP lines look like "1.2.3.0/24 ; SBL12345" — keep the CIDR only.
-            .map(l => l.split(';')[0].split(/\s+/)[0].trim())
-            .filter(l => l && !l.startsWith('#') && !l.startsWith('//'));
-        await this.db.query(`DELETE FROM fraud_blocklist WHERE source = ?`, [sourceKey]);
+        const lines = Array.from(new Set(
+            data.split('\n')
+                .map(l => l.trim())
+                // Spamhaus DROP lines look like "1.2.3.0/24 ; SBL12345" — keep the CIDR only.
+                .map(l => l.split(';')[0].split(/\s+/)[0].trim())
+                .filter(l => l && !l.startsWith('#') && !l.startsWith('//'))
+                .map(l => l.toLowerCase()),
+        ));
+        const contentHash = createHash('sha256').update(lines.join('\n')).digest('hex');
+        const [state]: any[] = await this.db.query(`SELECT contentHash, entries FROM fraud_feed_state WHERE source = ?`, [sourceKey]).catch(() => []);
+        if (state && state.contentHash === contentHash && Number(state.entries) === lines.length) {
+            const [{ n }]: any[] = await this.db.query(`SELECT COUNT(*) AS n FROM fraud_blocklist WHERE source = ?`, [sourceKey]);
+            if (Number(n) === lines.length) {
+                await this.db.query(`UPDATE fraud_feed_state SET syncedAt = NOW() WHERE source = ?`, [sourceKey]).catch(() => undefined);
+                return lines.length;
+            }
+        }
+        const staging = `${sourceKey}~staging`;
+        await this.deleteSourceRows(staging);
         const batchSize = 500;
-        let inserted = 0;
         for (let i = 0; i < lines.length; i += batchSize) {
             const batch = lines.slice(i, i + batchSize);
             const placeholders = batch.map(() => `(?, ?, ?, '', NOW(), NOW())`).join(',');
-            const params = batch.flatMap(v => [type, v.toLowerCase(), sourceKey]);
-            await this.db.query(
-                `INSERT IGNORE INTO fraud_blocklist (listType, value, source, note, createdAt, updatedAt) VALUES ${placeholders}`,
+            const params = batch.flatMap(v => [type, v, staging]);
+            await this.withLockRetry(() => this.db.query(
+                `INSERT INTO fraud_blocklist (listType, value, source, note, createdAt, updatedAt) VALUES ${placeholders}`,
                 params,
-            );
-            inserted += batch.length;
+            ), `insert ${sourceKey}`);
         }
-        return inserted;
+        // Swap: old rows out, staging rows in — both in id-chunks.
+        await this.deleteSourceRows(sourceKey);
+        for (;;) {
+            const rows: any[] = await this.db.query(`SELECT id FROM fraud_blocklist WHERE source = ? ORDER BY id LIMIT 2000`, [staging]);
+            if (!rows.length) break;
+            const ids = rows.map(r => Number(r.id));
+            await this.withLockRetry(() => this.db.query(`UPDATE fraud_blocklist SET source = ? WHERE id IN (${ids.map(() => '?').join(',')})`, [sourceKey, ...ids]), `swap ${sourceKey}`);
+        }
+        await this.db.query(`DELETE FROM fraud_feed_state WHERE source = ?`, [sourceKey]).catch(() => undefined);
+        await this.db.query(`INSERT INTO fraud_feed_state (source, contentHash, entries, syncedAt) VALUES (?, ?, ?, NOW())`, [sourceKey, contentHash, lines.length]).catch(() => undefined);
+        return lines.length;
     }
 
+    private syncInFlight = false;
+
     async syncAll(): Promise<{ results: any[] }> {
+        if (this.syncInFlight) return { results: [{ source: 'all', success: false, entries: 0, message: 'A feed sync is already running' }] };
+        this.syncInFlight = true;
+        let dbLock = false;
+        try {
+            const [row]: any[] = await this.db.query(`SELECT GET_LOCK('hulo_fraud_feed_sync', 0) AS ok`).catch(() => [{ ok: 1 }]);
+            if (row && Number(row.ok) === 0) return { results: [{ source: 'all', success: false, entries: 0, message: 'A feed sync is already running in another process' }] };
+            dbLock = !!row;
+            return await this.syncAllInner();
+        } finally {
+            this.syncInFlight = false;
+            if (dbLock) await this.db.query(`SELECT RELEASE_LOCK('hulo_fraud_feed_sync')`).catch(() => undefined);
+        }
+    }
+
+    private async syncAllInner(): Promise<{ results: any[] }> {
         const results = [];
         for (const key of Object.keys(FRAUD_SOURCES)) {
             results.push({ source: key, ...(await this.syncSource(key)) });
@@ -1330,14 +1465,14 @@ export class FraudPreventionService implements OnModuleInit {
                     return reject(new Error(`HTTP ${res.statusCode}`));
                 }
                 const MAX_BYTES = 30 * 1024 * 1024; // 30 MB cap
-                let data = '';
+                const chunks: Buffer[] = [];
                 let bytes = 0;
                 res.on('data', (chunk: Buffer) => {
                     bytes += chunk.length;
                     if (bytes > MAX_BYTES) { req.destroy(); reject(new Error('Feed too large (>30 MB)')); return; }
-                    data += chunk.toString();
+                    chunks.push(chunk);
                 });
-                res.on('end', () => resolve(data));
+                res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
             });
             req.on('error', reject);
             req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
@@ -1346,6 +1481,7 @@ export class FraudPreventionService implements OnModuleInit {
 
     // ── IP intelligence cache ──────────────────────────────────────────
     private async getIpIntel(ip: string): Promise<IpIntel> {
+        ip = normaliseIp(ip);
         const rows = await this.db.query(
             `SELECT * FROM fraud_ip_intel WHERE ip = ? AND checkedAt > DATE_SUB(NOW(), INTERVAL 30 DAY)`,
             [ip],
@@ -1384,18 +1520,18 @@ export class FraudPreventionService implements OnModuleInit {
                     SUM(o.state = 'Cancelled') AS cancelled,
                     MIN(o.orderPlacedAt) AS firstOrder, MAX(o.orderPlacedAt) AS lastOrder
              FROM \`order\` o JOIN customer c ON c.id = o.customerId
-             WHERE LOWER(c.emailAddress) IN (${ph})`, like,
+             WHERE c.emailAddress IN (${ph})`, like,
         );
         const recentOrders = await this.db.query(
             `SELECT o.code, o.state, o.subTotalWithTax, o.orderPlacedAt, o.customFieldsIp AS ip
              FROM \`order\` o JOIN customer c ON c.id = o.customerId
-             WHERE LOWER(c.emailAddress) IN (${ph})
+             WHERE c.emailAddress IN (${ph})
              ORDER BY o.orderPlacedAt DESC LIMIT 10`, like,
         );
         const [failedPayments] = await this.db.query(
             `SELECT COUNT(*) AS n FROM payment p
              JOIN \`order\` o ON o.id = p.orderId JOIN customer c ON c.id = o.customerId
-             WHERE LOWER(c.emailAddress) IN (${ph}) AND p.state IN ('Declined','Error','Cancelled')`, like,
+             WHERE c.emailAddress IN (${ph}) AND p.state IN ('Declined','Error','Cancelled')`, like,
         );
         const cases = await this.db.query(
             `SELECT id, orderCode, riskScore, status, createdAt, reviewNotes
@@ -1550,6 +1686,10 @@ export class FraudPreventionService implements OnModuleInit {
 
     // ── Notifications ──────────────────────────────────────────────────
     async getNotificationConfig(): Promise<any> {
+        return this.cached('notif', 30_000, () => this.loadNotificationConfig());
+    }
+
+    private async loadNotificationConfig(): Promise<any> {
         const rows = await this.db.query(`SELECT * FROM fraud_notification_config LIMIT 1`).catch(() => []);
         const smtp = this.smtpSettings();
         return {
@@ -1571,6 +1711,7 @@ export class FraudPreventionService implements OnModuleInit {
     }
 
     async saveNotificationConfig(body: any): Promise<void> {
+        this.forget('notif');
         await this.db.query(
             `INSERT INTO fraud_notification_config (id, adminEmail, notifyOnBlocked, notifyOnHighRisk, notifyOnApproval, notifyOnRejection, blocklistOnReject,
                 slackWebhookUrl, discordWebhookUrl, teamsWebhookUrl, telegramBotToken, telegramChatId,
@@ -1606,17 +1747,35 @@ export class FraudPreventionService implements OnModuleInit {
         return null;
     }
 
+    private mailer: { key: string; transport: any } | null = null;
+    private transporter(smtp: { host: string; port: number; user: string; pass: string }) {
+        const key = `${smtp.host}:${smtp.port}:${smtp.user}`;
+        if (this.mailer?.key !== key) {
+            try { this.mailer?.transport?.close?.(); } catch { /* ignore */ }
+            this.mailer = { key, transport: nodemailer.createTransport({
+                host: smtp.host, port: smtp.port, secure: smtp.port === 465, auth: { user: smtp.user, pass: smtp.pass },
+                pool: true, maxConnections: 2, maxMessages: 100, connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000,
+            } as any) };
+        }
+        return this.mailer.transport;
+    }
+    private sendWithDeadline(message: any, ms = 25_000): Promise<void> {
+        const smtp = this.smtpSettings();
+        if (!smtp) return Promise.resolve();
+        let timer: any;
+        return Promise.race([
+            this.transporter(smtp).sendMail(message).then(() => undefined),
+            new Promise<void>((_, reject) => { timer = setTimeout(() => reject(new Error(`SMTP send timed out after ${ms / 1000}s`)), ms); }),
+        ]).finally(() => clearTimeout(timer));
+    }
+
     async sendAdminAlert(subject: string, html: string): Promise<void> {
         try {
             const smtp = this.smtpSettings();
             if (!smtp) return;
             const cfg = await this.getNotificationConfig();
             if (!cfg.adminEmail) return;
-            const transporter = nodemailer.createTransport({
-                host: smtp.host, port: smtp.port, secure: smtp.port === 465,
-                auth: { user: smtp.user, pass: smtp.pass },
-            });
-            await transporter.sendMail({
+            await this.sendWithDeadline({
                 from: smtp.from, to: cfg.adminEmail,
                 subject: `[Fraud Alert] ${subject}`,
                 html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">${html}</div>`,
@@ -1630,11 +1789,7 @@ export class FraudPreventionService implements OnModuleInit {
         try {
             const smtp = this.smtpSettings();
             if (!smtp || !to) return;
-            const transporter = nodemailer.createTransport({
-                host: smtp.host, port: smtp.port, secure: smtp.port === 465,
-                auth: { user: smtp.user, pass: smtp.pass },
-            });
-            await transporter.sendMail({
+            await this.sendWithDeadline({
                 from: smtp.from, to, subject,
                 html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">${html}</div>`,
             });

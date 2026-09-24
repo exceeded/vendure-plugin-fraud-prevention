@@ -36,9 +36,11 @@ export class FraudPreventionController {
         if (!this.limiter.allow(`check:${ip}`)) {
             return res.status(429).json({ error: 'rate_limited' });
         }
+        const channelId = Number(body?.channelId);
         const assessment = await this.service.assess({
-            channelId: Number(body.channelId || 1),
-            ip: body.ip || ip,
+            channelId: Number.isFinite(channelId) && channelId > 0 ? channelId : 1,
+            // The caller's own address, not one it chooses.
+            ip,
             email: body.email,
             orderValuePence: Number(body.orderValuePence || 0),
             countryCode: body.countryCode || (req.headers['cf-ipcountry'] as string) || undefined,
@@ -411,7 +413,11 @@ export class FraudPreventionController {
     ) {
         if (denyUnlessAdmin(ctx, res, true)) return;
         if (list !== 'whitelist' && list !== 'blocklist') return res.status(400).json({ error: 'bad list' });
-        await this.service.addEntry(list, body.type, body.value, body.note);
+        try {
+            await this.service.addEntry(list, String(body?.type || ''), String(body?.value || ''), body?.note);
+        } catch (e: any) {
+            return res.status(400).json({ error: 'bad_entry', message: e?.message || 'Invalid entry' });
+        }
         return res.json({ success: true });
     }
 

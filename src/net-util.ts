@@ -5,6 +5,13 @@
  * detection.
  */
 
+/** Canonical client address: IPv4-mapped IPv6 (`::ffff:1.2.3.4`, what dual-stack sockets report) becomes plain IPv4; everything is lowercased and trimmed. */
+export function normaliseIp(raw: unknown): string {
+    const s = String(raw ?? '').trim().toLowerCase();
+    const m = s.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+    return m ? m[1] : s;
+}
+
 export function ipv4ToInt(ip: string): number | null {
     const m = ip.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
     if (!m) return null;

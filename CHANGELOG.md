@@ -5,6 +5,21 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] — 2026-09-24
+
+### Fixed
+- Nightly threat-feed sync no longer deadlocks: `fraud_blocklist` gains a `source` index, feeds that have not changed (same content hash) are skipped, changed feeds are loaded under a staging key and swapped in id-sized chunks with deadlock retries, and a sync cannot overlap another (in-process flag plus a database lock across server and worker).
+- The review case is written before the assessment log in enforce mode, closing the window in which a host fulfilment run could release an order about to be held; a re-delivered event can no longer open a second case.
+- IPv4-mapped addresses (`::ffff:1.2.3.4`) are normalised, IPv6 addresses reach the IP-intelligence lookup, blocklisted emails match their canonical form, list entries are validated (type, CIDR syntax, email, domain), thresholds are clamped and ordered, and the public pre-check uses the caller's own address.
+- Ops webhooks treat a non-2xx reply as a failure and log it at warn level.
+
+### Changed
+- `fraud_log(orderId)` and `fraud_blocked_orders(orderId, status)` indexes for the host fulfilment gate and order panel.
+- The IP-intelligence and MX lookups start at the beginning of an assessment and run in parallel with the database signals; a lookup timeout is 2.5 s; failed lookups are remembered for 15 minutes and calls are rate-limited to 40/min so a wave of new addresses cannot stall scoring or exhaust the provider.
+- Assessments run at most six at a time; channel/notification config and dashboard stats are memoised for 30 s; the customer-history queries no longer wrap the email in `LOWER()` so the index is used.
+- One pooled SMTP transport with 10 s connect / 25 s send deadlines; admin and customer emails are sent after the case row is written, off the assessment path.
+- Audit-log pruning runs in 5,000-row chunks; feed downloads are buffered as bytes.
+
 ## [0.19.0] — 2026-09-11
 
 ### Added

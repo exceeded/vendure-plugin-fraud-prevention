@@ -1,4 +1,5 @@
 import * as http from 'http';
+import { isIP } from 'net';
 import { Logger } from '@vendure/core';
 
 const loggerCtx = 'FraudPrevention';
@@ -18,9 +19,30 @@ export interface IpIntel {
  * the rate limit only matters for genuinely new IPs. Lookups fail OPEN:
  * a timeout or rate-limit never adds points and never blocks an order.
  */
-export function lookupIpIntel(ip: string, timeoutMs = 4000): Promise<IpIntel> {
+const negativeCache = new Map<string, number>();
+const NEGATIVE_TTL = 15 * 60 * 1000;
+// Token bucket: 40 lookups per minute, refilled continuously.
+let tokens = 40;
+let lastRefill = Date.now();
+function takeToken(): boolean {
+    const now = Date.now();
+    tokens = Math.min(40, tokens + ((now - lastRefill) / 60_000) * 40);
+    lastRefill = now;
+    if (tokens < 1) return false;
+    tokens -= 1;
+    return true;
+}
+/** Test hook. */
+export function _resetIpIntelState() { negativeCache.clear(); tokens = 40; lastRefill = Date.now(); }
+
+export function lookupIpIntel(ip: string, timeoutMs = 2500): Promise<IpIntel> {
     const empty: IpIntel = { ip, countryCode: null, isVpnOrProxy: false, isHosting: false, resolved: false };
-    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return Promise.resolve(empty);
+    if (!isIP(ip)) return Promise.resolve(empty);
+    // A lookup that failed (timeout, rate limit, bad answer) is remembered for a while so a wave of
+    // orders from new addresses does not pay the full timeout each, and ip-api's 45/min is respected.
+    const neg = negativeCache.get(ip);
+    if (neg && Date.now() - neg < NEGATIVE_TTL) return Promise.resolve(empty);
+    if (!takeToken()) return Promise.resolve(empty);
     return new Promise(resolve => {
         const req = http.get(
             `http://ip-api.com/json/${ip}?fields=status,countryCode,proxy,hosting`,
@@ -31,7 +53,7 @@ export function lookupIpIntel(ip: string, timeoutMs = 4000): Promise<IpIntel> {
                 res.on('end', () => {
                     try {
                         const j = JSON.parse(data);
-                        if (j.status !== 'success') return resolve(empty);
+                        if (j.status !== 'success') { negativeCache.set(ip, Date.now()); return resolve(empty); }
                         resolve({
                             ip,
                             countryCode: j.countryCode || null,
@@ -47,9 +69,10 @@ export function lookupIpIntel(ip: string, timeoutMs = 4000): Promise<IpIntel> {
         );
         req.on('error', e => {
             Logger.debug(`ip-intel lookup failed for ${ip}: ${e.message}`, loggerCtx);
+            negativeCache.set(ip, Date.now());
             resolve(empty);
         });
-        req.on('timeout', () => { req.destroy(); resolve(empty); });
+        req.on('timeout', () => { req.destroy(); negativeCache.set(ip, Date.now()); resolve(empty); });
     });
 }
 

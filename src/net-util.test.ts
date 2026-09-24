@@ -121,3 +121,14 @@ describe('renderBody (HTML-aware)', () => {
         expect(looksLikeHtml('just text')).toBe(false);
     });
 });
+
+import { normaliseIp } from './net-util';
+
+describe('normaliseIp', () => {
+    it('unwraps IPv4-mapped IPv6 addresses and trims', () => {
+        expect(normaliseIp('::ffff:203.0.113.9')).toBe('203.0.113.9');
+        expect(normaliseIp('  203.0.113.9 ')).toBe('203.0.113.9');
+        expect(normaliseIp('2A06:98C0:3600::103')).toBe('2a06:98c0:3600::103');
+        expect(normaliseIp(undefined)).toBe('');
+    });
+});
