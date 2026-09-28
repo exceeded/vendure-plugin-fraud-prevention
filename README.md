@@ -133,7 +133,7 @@ false, threeDsResult: 'failed' }` alongside the AVS fields (the type is
 ## Threat feeds
 
 Daily sync (03:00) into the blocklist: **FireHOL Level 1**, **Spamhaus DROP**
-(CIDR ranges are matched properly), **Tor exit nodes**, and the
+(IPv4 and IPv6 CIDR ranges are matched), **Tor exit nodes**, and the
 community **disposable-email-domains** list. Manual allow/block entries ride
 on top.
 
@@ -212,9 +212,11 @@ https://huloglobal.com/vendure-plugins/fraud-prevention/.
 
 ## Compatibility
 
-Vendure `>=3.5 <4`. MariaDB/MySQL. Tables are created/migrated automatically
-on boot; upgrading from the pre-plugin HULO implementation preserves all
-existing config, log and list data.
+Vendure `>=3.5 <4`. MariaDB/MySQL and PostgreSQL (through the licence SDK's
+SQL dialect adapter). Tables are created/migrated automatically on boot,
+including a best-effort index on Vendure's `payment(createdAt)`; upgrading
+from the pre-plugin HULO implementation preserves all existing config, log
+and list data. Block/allow list ranges accept IPv4 and IPv6 CIDR notation.
 
 ## License
 

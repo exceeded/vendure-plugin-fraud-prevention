@@ -313,6 +313,39 @@ run('@huloglobal/vendure-plugin-fraud-prevention (MariaDB)', () => {
         expect(a.signals.some(s => s.key === 'blocklist_ip_range')).toBe(true);
     });
 
+    it('IPv6 CIDR range blocklist matches an address inside the range and nothing outside it', async () => {
+        await svc().addEntry('blocklist', 'ip_range', '2001:db8:beef::/48', 'e2e');
+        await expect(svc().addEntry('blocklist', 'ip_range', '2001:db8::/129', 'e2e')).rejects.toThrow(/CIDR/);
+        const inside = await svc().assess({
+            channelId: 1, email: 'range6@example.com', ip: '2001:DB8:BEEF:1::42',
+            orderValuePence: 2000, dryRun: true,
+        });
+        expect(inside.signals.some(s => s.key === 'blocklist_ip_range')).toBe(true);
+        const outside = await svc().assess({
+            channelId: 1, email: 'range6@example.com', ip: '2001:db8:bef0::42',
+            orderValuePence: 2000, dryRun: true,
+        });
+        expect(outside.signals.some(s => s.key === 'blocklist_ip_range')).toBe(false);
+        // An IPv4-mapped client still matches its IPv4 range.
+        const mapped = await svc().assess({
+            channelId: 1, email: 'range@example.com', ip: '::ffff:198.51.100.89',
+            orderValuePence: 2000, dryRun: true,
+        });
+        expect(mapped.signals.some(s => s.key === 'blocklist_ip_range')).toBe(true);
+    });
+
+    it('an allowlisted CIDR range (IPv4 or IPv6) bypasses the checks', async () => {
+        await svc().addEntry('whitelist', 'ip_range', '2001:db8:cafe::/48', 'e2e');
+        await svc().addEntry('whitelist', 'ip_range', '198.51.100.128/25', 'e2e');
+        const v6 = await svc().assess({ channelId: 1, email: 'tmp@mailinator.com', ip: '2001:db8:cafe:9::1', orderValuePence: 900000, dryRun: true });
+        expect(v6.allowlisted).toBe(true);
+        // Inside the blocklisted /24 from above but in the allowlisted /25: allow wins.
+        const v4 = await svc().assess({ channelId: 1, email: 'tmp@mailinator.com', ip: '198.51.100.200', orderValuePence: 900000, dryRun: true });
+        expect(v4.allowlisted).toBe(true);
+        const outside = await svc().assess({ channelId: 1, email: 'tmp@mailinator.com', ip: '198.51.100.20', orderValuePence: 900000, dryRun: true });
+        expect(outside.allowlisted).toBeFalsy();
+    });
+
     // ── Custom feeds ─────────────────────────────────────────────────
     it('adds a custom feed and lists it', async () => {
         const r = await svc().addCustomFeed('IPsum', 'https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt', 'ip');

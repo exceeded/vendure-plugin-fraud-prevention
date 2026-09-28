@@ -5,6 +5,21 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.2] — 2026-09-28
+
+### Added
+- IPv6 CIDR ranges on the block and allow lists (`2001:db8::/32`, `::ffff:203.0.113.0/120`, a bare address is a /128). Matching runs over the expanded 128-bit form, so `::` compression, zone ids and IPv4-mapped forms all match; an IPv4 client is also checked against IPv4-mapped ranges and an IPv4-mapped client against IPv4 ranges. IPv4 ranges keep their integer fast path. Entry validation accepts either family.
+- Allowlisted `ip_range` entries are now honoured (previously only exact `ip` entries were checked when deciding whether an address bypasses the checks).
+
+### Changed
+- A best-effort `idx_fp_payment_created` index on Vendure's `payment(createdAt)`, created on boot, for the failed-payments signal and the 24 h failed-payment count (Vendure never indexes that column). Failure to create it is logged at debug level and never blocks start-up.
+
+### Fixed
+- PostgreSQL: every camelCase column read from Vendure's tables (`order`, `customer`, `payment`, `order_channels_channel`, `channel`) is quoted; `SUM(condition)` counts are written as `SUM(CASE WHEN … THEN 1 ELSE 0 END)`; `order.active` is compared as a boolean; the customer-history query no longer sends an untyped null parameter; the feed-sync cross-process lock uses a Postgres advisory lock (it was MariaDB `GET_LOCK` only).
+- The feed-sync lock is taken and released on one connection held for the duration of the sync. Session locks released through the pool could land on a different connection and leave the lock behind, making later syncs report "already running in another process".
+- On a fresh install the `fraud_blocked_orders(orderId, status)` index was requested before the table existed and silently skipped; it is now created after the table.
+- A PostgreSQL corpus test (`tests/pg-corpus.test.ts`, runs when `HULO_PG_URL` is set) extracts every SQL statement in `src/`, translates it with the SDK's dialect adapter and prepares it against a scratch database with quoted stand-ins for the Vendure tables, so a quoting or dialect regression fails the unit suite.
+
 ## [0.19.1] — 2026-09-24
 
 ### Fixed

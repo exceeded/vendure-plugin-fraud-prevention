@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ipInCidr, ipv4ToInt, normalizeEmail } from './net-util';
+import { ipInCidr, ipv4ToInt, isCidr, normalizeEmail, parseCidr } from './net-util';
 
 describe('ipv4ToInt', () => {
     it('parses valid addresses', () => {
@@ -130,5 +130,61 @@ describe('normaliseIp', () => {
         expect(normaliseIp('  203.0.113.9 ')).toBe('203.0.113.9');
         expect(normaliseIp('2A06:98C0:3600::103')).toBe('2a06:98c0:3600::103');
         expect(normaliseIp(undefined)).toBe('');
+    });
+});
+
+describe('ipInCidr (IPv6)', () => {
+    it('matches a /64 and a /32 prefix', () => {
+        expect(ipInCidr('2001:db8:abcd:1234:ffff:ffff:ffff:ffff', '2001:db8:abcd:1234::/64')).toBe(true);
+        expect(ipInCidr('2001:db8:abcd:1235::1', '2001:db8:abcd:1234::/64')).toBe(false);
+        expect(ipInCidr('2001:db8::1', '2001:db8::/32')).toBe(true);
+        expect(ipInCidr('2001:db9::1', '2001:db8::/32')).toBe(false);
+    });
+    it('a bare address is a /128 and compression does not matter', () => {
+        expect(ipInCidr('2001:db8::1', '2001:0db8:0000:0000:0000:0000:0000:0001')).toBe(true);
+        expect(ipInCidr('2001:db8::1', '2001:db8::1/128')).toBe(true);
+        expect(ipInCidr('2001:db8::2', '2001:db8::1/128')).toBe(false);
+        expect(ipInCidr('2001:DB8::1%eth0', '2001:db8::/48')).toBe(true);
+        expect(ipInCidr('[2001:db8::1]', '2001:db8::/48')).toBe(true);
+    });
+    it('::/0 matches everything', () => {
+        expect(ipInCidr('fe80::1', '::/0')).toBe(true);
+        expect(ipInCidr('1.2.3.4', '::/0')).toBe(true);
+    });
+    it('IPv4-mapped addresses match IPv4 ranges and IPv4 clients match mapped ranges', () => {
+        expect(ipInCidr('::ffff:192.168.1.55', '192.168.1.0/24')).toBe(true);
+        expect(ipInCidr('::ffff:192.168.2.55', '192.168.1.0/24')).toBe(false);
+        expect(ipInCidr('192.168.1.55', '::ffff:192.168.1.0/120')).toBe(true);
+        expect(ipInCidr('192.168.2.55', '::ffff:192.168.1.0/120')).toBe(false);
+        expect(ipInCidr('::ffff:c0a8:137', '::ffff:192.168.1.0/120')).toBe(true);
+        expect(ipInCidr('192.168.1.55', '::ffff:192.168.1.55')).toBe(true);
+    });
+    it('rejects malformed entries without throwing', () => {
+        expect(ipInCidr('2001:db8::1', '2001:db8::/129')).toBe(false);
+        expect(ipInCidr('2001:db8::1', '2001:db8::/-1')).toBe(false);
+        expect(ipInCidr('2001:db8::1', '2001:db8:::/64')).toBe(false);
+        expect(ipInCidr('2001:db8::1', '2001:db8::1::/64')).toBe(false);
+        expect(ipInCidr('2001:db8::1', '2001:db8:gggg::/64')).toBe(false);
+        expect(ipInCidr('2001:db8::1', '1:2:3:4:5:6:7:8:9/64')).toBe(false);
+        expect(ipInCidr('2001:db8::1', '1:2:3:4:5:6:7/64')).toBe(false);
+        expect(ipInCidr('2001:db8::1', '2001:db8::/64/1')).toBe(false);
+        expect(ipInCidr('2001:db8::1', '10.0.0.0/8')).toBe(false);
+        expect(ipInCidr('not-an-ip', '2001:db8::/32')).toBe(false);
+        expect(ipInCidr('', '')).toBe(false);
+    });
+});
+
+describe('isCidr / parseCidr', () => {
+    it('accepts IPv4 and IPv6 ranges and bare addresses', () => {
+        expect(isCidr('203.0.113.0/24')).toBe(true);
+        expect(isCidr('203.0.113.9')).toBe(true);
+        expect(isCidr('2001:db8::/32')).toBe(true);
+        expect(isCidr('::ffff:203.0.113.0/120')).toBe(true);
+        expect(parseCidr('2001:db8::/32')).toEqual({ family: 6, base: BigInt('0x20010db8') << BigInt(96), bits: 32 });
+        expect(parseCidr('10.0.0.0/8')).toEqual({ family: 4, base: 10 << 24, bits: 8 });
+    });
+    it('rejects malformed ranges', () => {
+        for (const bad of ['', '/24', '10.0.0.0/33', '10.0.0.0/8/1', '2001:db8::/129', '2001:db8::/x', 'example.com', '1.2.3', '2001:db8:::1'])
+            expect(isCidr(bad), bad).toBe(false);
     });
 });

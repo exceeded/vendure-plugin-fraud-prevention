@@ -22,7 +22,7 @@ export {
     RiskLevel,
 } from './types';
 export { FRAUD_SOURCES, CUSTOM_FEED_PRESETS } from './fraud-sources';
-export { ipInCidr, ipv4ToInt, normalizeEmail } from './net-util';
+export { ipInCidr, ipv4ToInt, ipv6ToBigInt, isCidr, parseCidr, normalizeEmail } from './net-util';
 export {
     AvsCheck,
     AvsResult,

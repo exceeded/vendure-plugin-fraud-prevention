@@ -27,7 +27,7 @@ import {
     RiskLevel,
 } from './types';
 import { BUILTIN_DISPOSABLE_DOMAINS, FRAUD_SOURCES } from './fraud-sources';
-import { ipInCidr, normalizeEmail, normaliseIp } from './net-util';
+import { ipInCidr, isCidr, normalizeEmail, normaliseIp } from './net-util';
 import {
     CardChecks,
     avsFromMetadata,
@@ -43,6 +43,8 @@ import { DEFAULT_TEMPLATES, MessageKind, renderTemplate, renderBody } from './te
 import { fanOutOpsEvent, OpsEvent } from './ops-notify';
 
 const loggerCtx = 'FraudPrevention';
+/** Postgres advisory-lock key for the feed sync (any fixed 64-bit value; 'HULOFEED' as bytes). */
+const FEED_SYNC_LOCK_KEY = '5211883387260327236';
 
 export interface AssessInput {
     channelId: number;
@@ -195,7 +197,6 @@ export class FraudPreventionService implements OnModuleInit {
         await this.db.query(`ALTER TABLE fraud_log ADD INDEX IF NOT EXISTS idx_fraud_log_created (createdAt)`);
         // The host fulfilment gate and the order panel look assessments up by order.
         await this.db.query(`ALTER TABLE fraud_log ADD INDEX IF NOT EXISTS idx_fraud_log_order (orderId)`).catch(() => undefined);
-        await this.db.query(`ALTER TABLE fraud_blocked_orders ADD INDEX IF NOT EXISTS idx_fraud_cases_order (orderId, status)`).catch(() => undefined);
         await this.db.query(`ALTER TABLE fraud_log ADD INDEX IF NOT EXISTS idx_fraud_log_channel (channelId, createdAt)`);
 
         await this.db.query(`
@@ -216,6 +217,7 @@ export class FraudPreventionService implements OnModuleInit {
         await this.db.query(`ALTER TABLE fraud_blocked_orders ADD COLUMN IF NOT EXISTS riskLevel VARCHAR(20) DEFAULT 'review'`);
         await this.db.query(`ALTER TABLE fraud_blocked_orders ADD COLUMN IF NOT EXISTS signals TEXT`);
         await this.db.query(`ALTER TABLE fraud_blocked_orders ADD INDEX IF NOT EXISTS idx_fraud_cases_status (status, createdAt)`);
+        await this.db.query(`ALTER TABLE fraud_blocked_orders ADD INDEX IF NOT EXISTS idx_fraud_cases_order (orderId, status)`).catch(() => undefined);
 
         await this.db.query(`
             CREATE TABLE IF NOT EXISTS fraud_blocklist (
@@ -295,6 +297,18 @@ export class FraudPreventionService implements OnModuleInit {
                 body TEXT,
                 PRIMARY KEY (channelId, kind)
             )`);
+        // The failed-payments signal and the overview count Vendure `payment` rows by createdAt, which Vendure
+        // never indexes. Best effort: MariaDB (>= 10.1) and Postgres accept IF NOT EXISTS; MySQL 8 does not, so
+        // a plain CREATE INDEX is tried once and a duplicate-name error is ignored.
+        try {
+            await this.db.query(`CREATE INDEX IF NOT EXISTS idx_fp_payment_created ON payment (\`createdAt\`)`);
+        } catch (e: any) {
+            try {
+                await this.db.query(`CREATE INDEX idx_fp_payment_created ON payment (\`createdAt\`)`);
+            } catch (e2: any) {
+                Logger.debug(`payment(createdAt) index not created: ${e2?.message || e?.message}`, loggerCtx);
+            }
+        }
     }
 
     // ── Config ──────────────────────────────────────────────────────────
@@ -459,14 +473,20 @@ export class FraudPreventionService implements OnModuleInit {
             if (exact.length) {
                 push('blocklist_ip', 'Blocklisted IP', `${input.ip} (${exact[0].source})`);
             } else {
-                // CIDR ranges: match the /8 prefix candidates in SQL first so we
-                // never scan all rows, then verify precisely in JS.
+                // CIDR ranges: narrow the candidates in SQL first so we never scan
+                // all rows (IPv4: same /8 prefix, catch-all 0.x and IPv4-mapped
+                // ranges; IPv6: every IPv6 range), then verify precisely in JS.
+                const isV6 = input.ip.includes(':');
                 const firstOctet = input.ip.split('.')[0];
                 const ranges = await this.db.query(
-                    `SELECT source, value FROM fraud_blocklist
-                     WHERE listType = 'ip_range' AND (value LIKE ? OR value LIKE '0.%')
-                     LIMIT 2000`,
-                    [`${firstOctet}.%`],
+                    isV6
+                        ? `SELECT source, value FROM fraud_blocklist
+                           WHERE listType = 'ip_range' AND value LIKE '%:%'
+                           LIMIT 2000`
+                        : `SELECT source, value FROM fraud_blocklist
+                           WHERE listType = 'ip_range' AND (value LIKE ? OR value LIKE '0.%' OR value LIKE '::ffff:%')
+                           LIMIT 2000`,
+                    isV6 ? [] : [`${firstOctet}.%`],
                 ).catch(() => []);
                 const hit = ranges.find((r: any) => ipInCidr(input.ip!, r.value));
                 if (hit) push('blocklist_ip_range', 'IP in blocklisted range', `${input.ip} ∈ ${hit.value} (${hit.source})`);
@@ -490,7 +510,7 @@ export class FraudPreventionService implements OnModuleInit {
         if (input.ip) {
             const [hourRow] = await this.db.query(
                 `SELECT COUNT(*) AS cnt FROM \`order\`
-                 WHERE customFieldsIp = ? AND orderPlacedAt > DATE_SUB(NOW(), INTERVAL 1 HOUR)`,
+                 WHERE \`customFieldsIp\` = ? AND \`orderPlacedAt\` > DATE_SUB(NOW(), INTERVAL 1 HOUR)`,
                 [input.ip],
             );
             const hourCnt = Number(hourRow?.cnt || 0);
@@ -501,7 +521,7 @@ export class FraudPreventionService implements OnModuleInit {
             }
             const [dayRow] = await this.db.query(
                 `SELECT COUNT(*) AS cnt FROM \`order\`
-                 WHERE customFieldsIp = ? AND orderPlacedAt > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+                 WHERE \`customFieldsIp\` = ? AND \`orderPlacedAt\` > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
                 [input.ip],
             );
             const dayCnt = Number(dayRow?.cnt || 0);
@@ -517,10 +537,10 @@ export class FraudPreventionService implements OnModuleInit {
                 ? [norm.email]
                 : [norm.email, norm.canonical];
             const [emailRow] = await this.db.query(
-                `SELECT COUNT(*) AS cnt, COALESCE(SUM(o.subTotalWithTax), 0) AS totalValue
-                 FROM \`order\` o JOIN customer c ON c.id = o.customerId
-                 WHERE c.emailAddress IN (${like.map(() => '?').join(',')})
-                   AND o.orderPlacedAt > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+                `SELECT COUNT(*) AS cnt, COALESCE(SUM(o.\`subTotalWithTax\`), 0) AS totalValue
+                 FROM \`order\` o JOIN customer c ON c.id = o.\`customerId\`
+                 WHERE c.\`emailAddress\` IN (${like.map(() => '?').join(',')})
+                   AND o.\`orderPlacedAt\` > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
                 like,
             );
             const cnt = Number(emailRow?.cnt || 0);
@@ -538,9 +558,9 @@ export class FraudPreventionService implements OnModuleInit {
         //     inside 24h is the classic card-testing pattern.
         if (input.ip) {
             const [fanRow] = await this.db.query(
-                `SELECT COUNT(DISTINCT LOWER(c.emailAddress)) AS n
-                 FROM \`order\` o JOIN customer c ON c.id = o.customerId
-                 WHERE o.customFieldsIp = ? AND o.orderPlacedAt > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+                `SELECT COUNT(DISTINCT LOWER(c.\`emailAddress\`)) AS n
+                 FROM \`order\` o JOIN customer c ON c.id = o.\`customerId\`
+                 WHERE o.\`customFieldsIp\` = ? AND o.\`orderPlacedAt\` > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
                 [input.ip],
             );
             const fan = Number(fanRow?.n || 0);
@@ -634,11 +654,10 @@ export class FraudPreventionService implements OnModuleInit {
         } else if (norm) {
             const like = norm.canonical === norm.email ? [norm.email] : [norm.email, norm.canonical];
             const [histRow] = await this.db.query(
-                `SELECT COUNT(*) AS n FROM \`order\` o JOIN customer c ON c.id = o.customerId
-                 WHERE c.emailAddress IN (${like.map(() => '?').join(',')})
-                   AND o.state IN ('PaymentSettled', 'Delivered')
-                   AND (o.id <> ? OR ? IS NULL)`,
-                [...like, input.orderId || null, input.orderId || null],
+                `SELECT COUNT(*) AS n FROM \`order\` o JOIN customer c ON c.id = o.\`customerId\`
+                 WHERE c.\`emailAddress\` IN (${like.map(() => '?').join(',')})
+                   AND o.state IN ('PaymentSettled', 'Delivered')${input.orderId ? ' AND o.id <> ?' : ''}`,
+                input.orderId ? [...like, input.orderId] : like,
             );
             settledCount = Number(histRow?.n || 0);
         }
@@ -665,9 +684,9 @@ export class FraudPreventionService implements OnModuleInit {
         //    recorded before any Payment row existed.
         if (input.ip) {
             const [fpRow] = await this.db.query(
-                `SELECT COUNT(*) AS cnt FROM payment p JOIN \`order\` o ON o.id = p.orderId
-                 WHERE o.customFieldsIp = ? AND p.state IN ('Declined', 'Error', 'Cancelled')
-                   AND p.createdAt > DATE_SUB(NOW(), INTERVAL 1 HOUR)`,
+                `SELECT COUNT(*) AS cnt FROM payment p JOIN \`order\` o ON o.id = p.\`orderId\`
+                 WHERE o.\`customFieldsIp\` = ? AND p.state IN ('Declined', 'Error', 'Cancelled')
+                   AND p.\`createdAt\` > DATE_SUB(NOW(), INTERVAL 1 HOUR)`,
                 [input.ip],
             );
             const vendureCnt = Number(fpRow?.cnt || 0);
@@ -782,6 +801,15 @@ export class FraudPreventionService implements OnModuleInit {
                 `SELECT id FROM fraud_whitelist WHERE type = 'ip' AND value = ? LIMIT 1`, [ip],
             ).catch(() => []);
             if (wl.length) return true;
+            // Allowlisted ranges (IPv4 or IPv6 CIDR), narrowed in SQL the same way as blocklist ranges.
+            const isV6 = ip.includes(':');
+            const ranges = await this.db.query(
+                isV6
+                    ? `SELECT value FROM fraud_whitelist WHERE type = 'ip_range' AND value LIKE '%:%' LIMIT 2000`
+                    : `SELECT value FROM fraud_whitelist WHERE type = 'ip_range' AND (value LIKE ? OR value LIKE '0.%' OR value LIKE '::ffff:%') LIMIT 2000`,
+                isV6 ? [] : [`${ip.split('.')[0]}.%`],
+            ).catch(() => []);
+            if (ranges.some((r: any) => ipInCidr(ip, r.value))) return true;
         }
         return false;
     }
@@ -908,11 +936,11 @@ export class FraudPreventionService implements OnModuleInit {
         if (prefix) { clauses.push('bo.signals LIKE ?'); params.push(`%"key":"${prefix}%`); }
         const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
         return this.db.query(
-            `SELECT bo.*, o.code AS liveOrderCode, o.state AS orderState, o.subTotalWithTax,
-                    c.firstName, c.lastName, c.emailAddress
+            `SELECT bo.*, o.code AS liveOrderCode, o.state AS orderState, o.\`subTotalWithTax\` AS subTotalWithTax,
+                    c.\`firstName\` AS firstName, c.\`lastName\` AS lastName, c.\`emailAddress\` AS emailAddress
              FROM fraud_blocked_orders bo
              LEFT JOIN \`order\` o ON o.id = bo.orderId
-             LEFT JOIN customer c ON c.id = o.customerId
+             LEFT JOIN customer c ON c.id = o.\`customerId\`
              ${where} ORDER BY bo.createdAt DESC LIMIT ${Math.min(take, 500)}`,
             params,
         ).catch(() => []);
@@ -954,7 +982,7 @@ export class FraudPreventionService implements OnModuleInit {
                 result.refunds = outcome.refunds;
                 result.warnings = outcome.warnings;
             }
-            await this.db.query(`UPDATE \`order\` SET active = 0 WHERE id = ? AND active = 1`, [c.orderId]);
+            await this.db.query(`UPDATE \`order\` SET active = FALSE WHERE id = ? AND active IS TRUE`, [c.orderId]);
         }
         await this.db.query(
             `INSERT INTO fraud_log (channelId, orderId, orderCode, ip, email, riskScore, riskLevel, reasons, action, createdAt)
@@ -978,7 +1006,7 @@ export class FraudPreventionService implements OnModuleInit {
     private async adminContextForOrder(orderId: number, preferredChannelId?: number): Promise<RequestContext> {
         let token: string | undefined;
         const rows = await this.db.query(
-            `SELECT c.id, c.token FROM channel c JOIN order_channels_channel oc ON oc.channelId = c.id WHERE oc.orderId = ?`,
+            `SELECT c.id, c.token FROM channel c JOIN order_channels_channel oc ON oc.\`channelId\` = c.id WHERE oc.\`orderId\` = ?`,
             [orderId],
         ).catch(() => []);
         if (rows.length) {
@@ -1110,16 +1138,16 @@ export class FraudPreventionService implements OnModuleInit {
     private async computeStats(d: number): Promise<any> {
         const [totals] = await this.db.query(
             `SELECT COUNT(*) AS assessed,
-                    SUM(riskLevel IN ('review','blocked')) AS flagged,
-                    SUM(action = 'review') AS held,
-                    SUM(action = 'block') AS blocked
+                    SUM(CASE WHEN riskLevel IN ('review','blocked') THEN 1 ELSE 0 END) AS flagged,
+                    SUM(CASE WHEN action = 'review' THEN 1 ELSE 0 END) AS held,
+                    SUM(CASE WHEN action = 'block' THEN 1 ELSE 0 END) AS blocked
              FROM fraud_log WHERE createdAt > DATE_SUB(NOW(), INTERVAL ? DAY)
                AND action IN ('allow','flag','review','block')`,
             [d],
         );
         const daily = await this.db.query(
             `SELECT DATE(createdAt) AS day, COUNT(*) AS assessed,
-                    SUM(riskLevel IN ('review','blocked')) AS flagged
+                    SUM(CASE WHEN riskLevel IN ('review','blocked') THEN 1 ELSE 0 END) AS flagged
              FROM fraud_log WHERE createdAt > DATE_SUB(NOW(), INTERVAL ? DAY)
                AND action IN ('allow','flag','review','block')
              GROUP BY DATE(createdAt) ORDER BY day`,
@@ -1136,18 +1164,18 @@ export class FraudPreventionService implements OnModuleInit {
             `SELECT COUNT(*) AS n FROM fraud_blocked_orders WHERE status = 'pending'`,
         );
         const [orders24] = await this.db.query(
-            `SELECT COUNT(*) AS totalOrders, COUNT(DISTINCT customFieldsIp) AS uniqueIps,
-                    COALESCE(SUM(subTotalWithTax), 0) AS totalValue
-             FROM \`order\` WHERE orderPlacedAt > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+            `SELECT COUNT(*) AS totalOrders, COUNT(DISTINCT \`customFieldsIp\`) AS uniqueIps,
+                    COALESCE(SUM(\`subTotalWithTax\`), 0) AS totalValue
+             FROM \`order\` WHERE \`orderPlacedAt\` > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
         );
         const [failed24] = await this.db.query(
             `SELECT COUNT(*) AS n FROM payment WHERE state IN ('Declined','Error','Cancelled')
-             AND createdAt > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+             AND \`createdAt\` > DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
         );
         const topIps = await this.db.query(
-            `SELECT customFieldsIp AS ip, COUNT(*) AS n FROM \`order\`
-             WHERE orderPlacedAt > DATE_SUB(NOW(), INTERVAL 24 HOUR) AND customFieldsIp IS NOT NULL AND customFieldsIp <> ''
-             GROUP BY customFieldsIp ORDER BY n DESC LIMIT 8`,
+            `SELECT \`customFieldsIp\` AS ip, COUNT(*) AS n FROM \`order\`
+             WHERE \`orderPlacedAt\` > DATE_SUB(NOW(), INTERVAL 24 HOUR) AND \`customFieldsIp\` IS NOT NULL AND \`customFieldsIp\` <> ''
+             GROUP BY \`customFieldsIp\` ORDER BY n DESC LIMIT 8`,
         );
         return {
             totals: totals || {}, daily, byLevel: topSignals,
@@ -1201,7 +1229,7 @@ export class FraudPreventionService implements OnModuleInit {
         if (!v) throw new Error('Empty value');
         if (!['ip', 'ip_range', 'email', 'email_domain'].includes(type)) throw new Error('Unknown list type');
         if (type === 'ip') v = normaliseIp(v);
-        if (type === 'ip_range' && !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(v)) throw new Error('Ranges must be IPv4 CIDR, e.g. 203.0.113.0/24');
+        if (type === 'ip_range' && !isCidr(v)) throw new Error('Ranges must be CIDR notation, e.g. 203.0.113.0/24 or 2001:db8::/32');
         if (type === 'email') { const n = normalizeEmail(v); if (!n) throw new Error('Not an email address'); v = n.canonical || n.email; }
         if (type === 'email_domain' && !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)) throw new Error('Not a domain');
         if (list === 'whitelist') {
@@ -1338,15 +1366,31 @@ export class FraudPreventionService implements OnModuleInit {
     async syncAll(): Promise<{ results: any[] }> {
         if (this.syncInFlight) return { results: [{ source: 'all', success: false, entries: 0, message: 'A feed sync is already running' }] };
         this.syncInFlight = true;
+        // Cross-process lock (server + worker, several instances): a database advisory lock. Both MariaDB's
+        // GET_LOCK and Postgres advisory locks are bound to the session that took them, so one query runner
+        // (one pooled connection) is held for the whole sync and releases it — going through the pool would
+        // release on a different connection and leave the lock behind until that connection closed.
+        const runner = this.connection.rawConnection.createQueryRunner();
         let dbLock = false;
         try {
-            const [row]: any[] = await this.db.query(`SELECT GET_LOCK('hulo_fraud_feed_sync', 0) AS ok`).catch(() => [{ ok: 1 }]);
-            if (row && Number(row.ok) === 0) return { results: [{ source: 'all', success: false, entries: 0, message: 'A feed sync is already running in another process' }] };
+            await runner.connect();
+            const acquired = this.db.dialect === 'postgres'
+                ? await runner.query(`SELECT pg_try_advisory_lock(${FEED_SYNC_LOCK_KEY}) AS ok`).catch(() => null)
+                : await runner.query(`SELECT GET_LOCK('hulo_fraud_feed_sync', 0) AS ok`).catch(() => null);
+            const row = Array.isArray(acquired) ? acquired[0] : null;
+            if (row && (row.ok === false || row.ok === 0 || row.ok === '0' || row.ok === 'f')) {
+                return { results: [{ source: 'all', success: false, entries: 0, message: 'A feed sync is already running in another process' }] };
+            }
             dbLock = !!row;
             return await this.syncAllInner();
         } finally {
             this.syncInFlight = false;
-            if (dbLock) await this.db.query(`SELECT RELEASE_LOCK('hulo_fraud_feed_sync')`).catch(() => undefined);
+            if (dbLock) {
+                await (this.db.dialect === 'postgres'
+                    ? runner.query(`SELECT pg_advisory_unlock(${FEED_SYNC_LOCK_KEY})`)
+                    : runner.query(`SELECT RELEASE_LOCK('hulo_fraud_feed_sync')`)).catch(() => undefined);
+            }
+            await runner.release().catch(() => undefined);
         }
     }
 
@@ -1515,23 +1559,23 @@ export class FraudPreventionService implements OnModuleInit {
 
         const [totals] = await this.db.query(
             `SELECT COUNT(*) AS orders,
-                    COALESCE(SUM(o.subTotalWithTax), 0) AS lifetimeValue,
-                    SUM(o.state IN ('PaymentSettled','Delivered')) AS settled,
-                    SUM(o.state = 'Cancelled') AS cancelled,
-                    MIN(o.orderPlacedAt) AS firstOrder, MAX(o.orderPlacedAt) AS lastOrder
-             FROM \`order\` o JOIN customer c ON c.id = o.customerId
-             WHERE c.emailAddress IN (${ph})`, like,
+                    COALESCE(SUM(o.\`subTotalWithTax\`), 0) AS lifetimeValue,
+                    SUM(CASE WHEN o.state IN ('PaymentSettled','Delivered') THEN 1 ELSE 0 END) AS settled,
+                    SUM(CASE WHEN o.state = 'Cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                    MIN(o.\`orderPlacedAt\`) AS firstOrder, MAX(o.\`orderPlacedAt\`) AS lastOrder
+             FROM \`order\` o JOIN customer c ON c.id = o.\`customerId\`
+             WHERE c.\`emailAddress\` IN (${ph})`, like,
         );
         const recentOrders = await this.db.query(
-            `SELECT o.code, o.state, o.subTotalWithTax, o.orderPlacedAt, o.customFieldsIp AS ip
-             FROM \`order\` o JOIN customer c ON c.id = o.customerId
-             WHERE c.emailAddress IN (${ph})
-             ORDER BY o.orderPlacedAt DESC LIMIT 10`, like,
+            `SELECT o.code, o.state, o.\`subTotalWithTax\` AS subTotalWithTax, o.\`orderPlacedAt\` AS orderPlacedAt, o.\`customFieldsIp\` AS ip
+             FROM \`order\` o JOIN customer c ON c.id = o.\`customerId\`
+             WHERE c.\`emailAddress\` IN (${ph})
+             ORDER BY o.\`orderPlacedAt\` DESC LIMIT 10`, like,
         );
         const [failedPayments] = await this.db.query(
             `SELECT COUNT(*) AS n FROM payment p
-             JOIN \`order\` o ON o.id = p.orderId JOIN customer c ON c.id = o.customerId
-             WHERE c.emailAddress IN (${ph}) AND p.state IN ('Declined','Error','Cancelled')`, like,
+             JOIN \`order\` o ON o.id = p.\`orderId\` JOIN customer c ON c.id = o.\`customerId\`
+             WHERE c.\`emailAddress\` IN (${ph}) AND p.state IN ('Declined','Error','Cancelled')`, like,
         );
         const cases = await this.db.query(
             `SELECT id, orderCode, riskScore, status, createdAt, reviewNotes
