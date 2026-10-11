@@ -85,15 +85,22 @@ export class FraudPreventionPlugin {
         });
         if (status.valid) {
             FraudPreventionPlugin.licenceStatus = status;
+            FraudPreventionPlugin.activeLicenceKey = key;
             FraudPreventionPlugin.evalClientInternal?.stop();
         }
         return status;
     }
 
+    /** The key currently in force (env/init key, admin-activated key or the one the
+     *  purchase claim installed) — the heartbeat reads it on every ping so usage
+     *  stats stay attributed to the licence after a runtime activation. */
+    private static activeLicenceKey: string | null = null;
+
     /** Drop an admin-activated key at runtime: back to unlicensed state
      *  (an env/init key, if any, is re-verified by the caller flow) and
      *  the evaluation clock resumes from wherever the server says it is. */
     static deactivateRuntimeLicence(): void {
+        FraudPreventionPlugin.activeLicenceKey = null;
         FraudPreventionPlugin.licenceStatus = {
             valid: false,
             message: 'No licence key configured. The plugin will run in unlicensed (degraded) mode.',
@@ -186,6 +193,7 @@ export class FraudPreventionPlugin {
             revokedIds: FraudPreventionPlugin.revocation.getRevokedIds(),
         });
         FraudPreventionPlugin.licenceStatus = status;
+        FraudPreventionPlugin.activeLicenceKey = status.valid ? (options.licenceKey || null) : null;
 
         if (!status.valid) {
             // Unlicensed: register the install (no premium is granted by this; the 14-day
@@ -205,6 +213,7 @@ export class FraudPreventionPlugin {
                 packageName: PKG_NAME,
                 packageVersion: PKG_VERSION,
                 licenceKey: options.licenceKey,
+                licenceKeyProvider: () => FraudPreventionPlugin.activeLicenceKey,
                 publicKeyFingerprint: fingerprintPublicKey(HULO_PUBLIC_KEY),
             });
             FraudPreventionPlugin.heartbeat.start();
