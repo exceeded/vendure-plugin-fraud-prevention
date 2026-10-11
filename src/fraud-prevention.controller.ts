@@ -1,9 +1,9 @@
 import { Body, Controller, Delete, Get, Param, Post, Query, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Ctx, Permission, RequestContext } from '@vendure/core';
-import { RateLimiter, performSelfUpdate, selfUpdateEnv, evalInstanceId, describeLicence } from '@huloglobal/vendure-licence-sdk';
+import { RateLimiter, performSelfUpdate, selfUpdateEnv, evalInstanceId, describeLicence, formatStat } from '@huloglobal/vendure-licence-sdk';
 
-import { FraudPreventionService } from './fraud-prevention.service';
+import { BUY_URL, FraudPreventionService, PREMIUM_FEATURES } from './fraud-prevention.service';
 import { parseRiskLevel, parseThreeDsAuthenticated } from './avs';
 import { FraudPreventionPlugin } from './plugin';
 import { CUSTOM_FEED_PRESETS, FRAUD_SOURCES } from './fraud-sources';
@@ -71,7 +71,85 @@ export class FraudPreventionController {
             licenceMessage: licence?.valid ? '' : (licence?.message || 'No licence key configured'),
             tier: licence?.valid ? 'paid' : (FraudPreventionPlugin.getEvalState()?.active ? 'trial' : 'free'),
             eval: FraudPreventionPlugin.getEvalState(),
+            // Lifecycle sentence (trial/key about to end), what the free tier loses, and the
+            // top 30-day figures — the banner shows "So far: …" from these.
+            notice: this.service.lifecycleNotice(),
+            premiumFeatures: PREMIUM_FEATURES,
+            recentStats: await this.service.recentStats().catch(() => []),
         });
+    }
+
+    // ── Admin: setup checklist, dashboard widget, weekly report ────────
+    /** Real checks (mode, enforce, alert email, feed sync, first case) for the
+     *  card at the top of the Overview tab; the same items feed the digest tips. */
+    @Get('setup')
+    async setup(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        return res.json(await this.service.setupChecklist(FraudPreventionPlugin.hasPremiumAccess()));
+    }
+
+    /** Light payload for the admin dashboard widget: three 7-day figures. */
+    @Get('widget')
+    async widget(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        const to = new Date();
+        const s = await this.service.usageStats(new Date(to.getTime() - 7 * 86_400_000), to);
+        return res.json({
+            tier: this.service.effectiveTier(),
+            notice: this.service.lifecycleNotice(),
+            stats: [
+                { label: 'Orders risk-scored', value: formatStat({ key: 'ordersAssessed', label: '', value: s.ordersAssessed }) },
+                { label: 'Risky orders intercepted', value: formatStat({ key: 'ordersHeld', label: '', value: s.ordersHeld + s.ordersBlocked }) },
+                { label: 'Value intercepted', value: formatStat({ key: 'riskyValuePence', label: '', value: s.riskyValuePence, format: 'pence' }) },
+            ],
+            route: '/extensions/fraud-prevention',
+        });
+    }
+
+    @Get('digest/settings')
+    async digestSettings(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        const settings = await this.service.digestSettings();
+        if (!settings) return res.status(503).json({ error: 'digest-unavailable' });
+        return res.json(settings);
+    }
+
+    @Post('digest/settings')
+    async saveDigestSettings(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        const patch: { enabled?: boolean; recipient?: string | null } = {};
+        if (typeof body?.enabled === 'boolean') patch.enabled = body.enabled;
+        if (body && 'recipient' in body) patch.recipient = body.recipient === null ? null : String(body.recipient || '').slice(0, 320);
+        try {
+            const settings = await this.service.updateDigestSettings(patch);
+            if (!settings) return res.status(503).json({ error: 'digest-unavailable' });
+            return res.json(settings);
+        } catch (e: any) {
+            return res.status(400).json({ error: 'bad-request', message: e?.message || 'Invalid settings' });
+        }
+    }
+
+    /** Send this week's report now to `to` (or the configured/default recipient). */
+    @Post('digest/send-test')
+    async digestSendTest(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        const to = String(body?.to || '').trim().slice(0, 320) || undefined;
+        if (to && !/^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/.test(to)) {
+            return res.status(400).json({ error: 'bad-request', message: 'Enter a valid email address' });
+        }
+        const r = await this.service.sendDigestNow(to);
+        if (!r) return res.status(503).json({ error: 'digest-unavailable' });
+        return res.status(200).json({ sent: r.sent, to: r.to, reason: r.reason, subject: r.preview.subject });
+    }
+
+    /** This week's report as HTML, for the "Preview" button. */
+    @Get('digest/preview')
+    async digestPreview(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        const mail = await this.service.previewDigest();
+        res.setHeader('content-type', 'text/html; charset=utf-8');
+        res.setHeader('cache-control', 'no-store');
+        return res.send(mail.html);
     }
 
     /** One-click in-app update (owner-approved feature): installs a
@@ -177,17 +255,20 @@ export class FraudPreventionController {
     @Post('eval/remind-me')
     async evalRemindMe(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
         if (denyUnlessAdmin(ctx, res, true)) return;
-        const email = String(body?.email || '').trim();
+        const email = String(body?.email || '').trim().slice(0, 320);
         const instanceId = FraudPreventionPlugin.getEvalInstanceId();
-        if (!email || !instanceId) return res.status(400).json({ error: 'bad-request' });
+        if (!/^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/.test(email) || !instanceId) return res.status(400).json({ error: 'bad-request' });
         try {
             const base = (process.env.HULO_LICENCE_EVAL_URL || 'https://elite.charity/licence/eval/register').replace(/\/register$/, '');
             const resp = await fetch(`${base}/lead`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ plugin: FraudPreventionPlugin.getPackageName(), instanceId, email }),
+                signal: AbortSignal.timeout(8_000),
             });
             if (!resp.ok) return res.status(502).json({ error: 'upstream', status: resp.status });
+            // Remembered as the weekly report's last-resort recipient.
+            await this.service.getPrefs().set('eval.leadEmail', email.toLowerCase());
             return res.json({ ok: true });
         } catch {
             return res.status(502).json({ error: 'unreachable' });
@@ -459,7 +540,7 @@ export class FraudPreventionController {
     ) {
         if (denyUnlessAdmin(ctx, res, true)) return;
         if (!FraudPreventionPlugin.hasPremiumAccess()) {
-            return res.status(402).json({ error: 'licence_required', message: 'Custom feeds require a licence.' });
+            return res.status(402).json({ error: 'licence_required', message: 'Custom feeds require a licence.', buyUrl: BUY_URL });
         }
         const result = await this.service.addCustomFeed(body.name, body.url, body.listType);
         return res.status(result.ok ? 200 : 400).json(result);
@@ -473,7 +554,7 @@ export class FraudPreventionController {
         if (denyUnlessAdmin(ctx, res, true)) return;
         if (body?.sync) {
             if (!FraudPreventionPlugin.hasPremiumAccess()) {
-                return res.status(402).json({ error: 'licence_required', message: 'Feed sync requires a licence.' });
+                return res.status(402).json({ error: 'licence_required', message: 'Feed sync requires a licence.', buyUrl: BUY_URL });
             }
             return res.json(await this.service.syncCustomFeed(Number(id)));
         }
@@ -495,6 +576,7 @@ export class FraudPreventionController {
             return res.status(402).json({
                 error: 'licence_required',
                 message: 'Threat-feed sync requires a licence — https://huloglobal.com/vendure-plugins/fraud-prevention/',
+                buyUrl: BUY_URL,
             });
         }
         if (body?.sourceKey) return res.json(await this.service.syncSource(body.sourceKey));

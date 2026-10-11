@@ -102,6 +102,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-outline gbtn-sm">Details ↗</a>
                 </div>
             </div>
+            <div class="notice-strip" *ngIf="meta.notice" role="status">{{ meta.notice.message }}</div>
         </vdr-page-block>
         <vdr-page-block *ngIf="meta && !meta.licensed">
             <div class="update-banner major" *ngIf="meta.tier === 'trial'">
@@ -112,6 +113,8 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     </ng-container>
                     <ng-template #evalNoClock>everything is enabled — enforce mode, review-queue holds, threat feeds and email alerts included.</ng-template>
                     Afterwards the plugin drops to the free tier (monitor + simulate only).
+                    <div class="banner-extra" *ngIf="meta.premiumFeatures?.length">Included now: {{ meta.premiumFeatures.join(' · ') }}</div>
+                    <div class="banner-extra" *ngIf="meta.recentStats?.length"><strong>So far:</strong> {{ statsLine() }}</div>
                 </div>
                 <div class="actions eval-actions">
                     <ng-container *ngIf="!remindMeSent">
@@ -129,6 +132,8 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                 <div>
                     <strong>🔓 Free tier</strong> — premium features need a licence. Start your <strong>14-day free trial</strong> below (card required, nothing charged until day 15, cancel any time) or buy a lifetime licence. Monitoring, manual lists and simulate stay active; enforce mode,
                     review-queue holds, threat-feed sync and email alerts need a licence. Your rules are saved and reactivate instantly with a key.
+                    <div class="banner-extra" *ngIf="meta.premiumFeatures?.length">With a licence: {{ meta.premiumFeatures.join(' · ') }}</div>
+                    <div class="banner-extra" *ngIf="meta.recentStats?.length"><strong>{{ meta.eval?.source === 'server' ? 'During your evaluation:' : 'So far:' }}</strong> {{ statsLine() }}</div>
                 </div>
                 <div class="actions">
                     <select [(ngModel)]="buyPlan" [disabled]="buying" style="padding:5px 9px;border:1px solid #d1d5db;border-radius:7px;font-size:12.5px;background:#fff;color:inherit"><option value="monthly">Monthly</option><option value="annual">Annual (2 months free)</option><option value="lifetime">Lifetime</option></select>
@@ -137,6 +142,7 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                     <a href="https://huloglobal.com/vendure-plugins/fraud-prevention/" target="_blank" class="gbtn gbtn-outline gbtn-sm">Details ↗</a>
                 </div>
             </div>
+            <div class="notice-strip" *ngIf="meta.notice" role="status">{{ meta.notice.message }}</div>
             <div class="update-banner" style="margin-top:8px">
                 <div><strong>🔑 Already have a licence key?</strong> Paste it from your purchase email to activate instantly — no .env edit, no redeploy.</div>
                 <div class="actions eval-actions">
@@ -202,6 +208,26 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
 
         <!-- ============================================================ OVERVIEW -->
         <ng-container *ngIf="!loading && current && tab === 'overview'">
+            <vdr-page-block *ngIf="setupVisible()">
+                <div class="card setup-card">
+                    <div class="card-block">
+                        <div class="row-between">
+                            <h3 class="step-title" style="margin:0">Set-up checklist <small>{{ setupDoneCount() }} of {{ setup?.items?.length || 0 }} done</small></h3>
+                            <a href="javascript:void(0)" class="setup-hide" (click)="hideSetup()">Hide</a>
+                        </div>
+                        <ul class="setup-list">
+                            <li class="setup-item" *ngFor="let it of setup?.items">
+                                <span class="setup-dot" [class.on]="it.done" aria-hidden="true"></span>
+                                <span class="setup-text">
+                                    <span class="setup-label" [class.done]="it.done">{{ it.label }}</span>
+                                    <span class="setup-hint" *ngIf="!it.done">{{ it.hint }}</span>
+                                </span>
+                                <a href="javascript:void(0)" class="setup-link" *ngIf="!it.done && it.tab" (click)="go($any(it.tab))">Open {{ it.tab }} →</a>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </vdr-page-block>
             <vdr-page-block>
                 <div class="kpi-row">
                     <div class="kpi">
@@ -223,6 +249,16 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
                         <div class="kpi-label">Failed payments</div>
                         <div class="kpi-num">{{ stats?.failedPayments24 || 0 }}</div>
                         <div class="kpi-sub">last 24 hours</div>
+                    </div>
+                    <div class="kpi">
+                        <div class="kpi-label">Risky orders intercepted</div>
+                        <div class="kpi-num">{{ (stats?.intercepted30?.held || 0) + (stats?.intercepted30?.blocked || 0) }}</div>
+                        <div class="kpi-sub">last 30 days · {{ stats?.intercepted30?.held || 0 }} held · {{ stats?.intercepted30?.blocked || 0 }} blocked</div>
+                    </div>
+                    <div class="kpi">
+                        <div class="kpi-label">£ value intercepted</div>
+                        <div class="kpi-num">£{{ ((stats?.intercepted30?.riskyValuePence || 0) / 100) | number:'1.2-2' }}</div>
+                        <div class="kpi-sub">last 30 days · order totals held or blocked</div>
                     </div>
                 </div>
             </vdr-page-block>
@@ -964,6 +1000,32 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
             <vdr-page-block>
                 <div class="card">
                     <div class="card-block">
+                        <h3 class="step-title">Weekly report</h3>
+                        <p class="hint">Every Monday at 08:00 (server time) Fraud Prevention emails a short report: orders scored, held and blocked, the value intercepted, review decisions, and the next set-up steps. Needs SMTP on the server (the same transport as the alerts).</p>
+                        <ng-container *ngIf="digest; else digestUnavailable">
+                            <label class="check-label"><input type="checkbox" [(ngModel)]="digest.enabled" (ngModelChange)="saveDigest({ enabled: $event })"> Send the weekly report</label>
+                            <div class="form-row" style="margin-top:10px;max-width:420px">
+                                <label>Recipient</label>
+                                <input class="form-input" type="email" [(ngModel)]="digestRecipient" [placeholder]="digest.defaultRecipient ? 'Defaults to ' + digest.defaultRecipient : 'you@company.com'" (keyup.enter)="saveDigest({ recipient: digestRecipient })">
+                            </div>
+                            <p class="hint" style="margin-top:6px">
+                                Last sent {{ digest.lastSentAt ? (digest.lastSentAt | date: 'd MMM y HH:mm') : 'never' }}
+                                · next {{ digest.nextDueAt ? (digest.nextDueAt | date: 'EEE d MMM HH:mm') : 'off' }}
+                                <span *ngIf="!digest.recipient && !digest.defaultRecipient" class="warn-inline"> · no recipient yet — enter one above or set the alert email</span>
+                            </p>
+                            <div class="picker">
+                                <button class="gbtn gbtn-primary gbtn-sm" (click)="saveDigest({ recipient: digestRecipient })" [disabled]="digestBusy || digestRecipient === (digest.recipient || '')">Save recipient</button>
+                                <button class="gbtn gbtn-outline gbtn-sm" (click)="sendDigestTest()" [disabled]="digestBusy">{{ digestBusy ? 'Sending…' : 'Send me a test' }}</button>
+                                <button class="gbtn gbtn-outline gbtn-sm" (click)="previewDigest()" [disabled]="digestBusy">Preview</button>
+                            </div>
+                        </ng-container>
+                        <ng-template #digestUnavailable><p class="hint">{{ digestLoadFailed ? 'The weekly report is not available on this server.' : 'Loading…' }}</p></ng-template>
+                    </div>
+                </div>
+            </vdr-page-block>
+            <vdr-page-block>
+                <div class="card">
+                    <div class="card-block">
                         <h3 class="step-title">About</h3>
                         <p class="hint" *ngIf="meta">
                             <!--email_off-->{{ meta.name }} v{{ meta.version }}<!--/email_off--> ·
@@ -1358,6 +1420,26 @@ type Tab = 'overview' | 'rules' | 'review' | 'lists' | 'simulate' | 'lookup' | '
         .eval-actions { align-items:center; }
         .eval-email { padding:5px 9px; border:1px solid var(--gb-ui-border); border-radius:7px; font-size:12.5px; min-width:190px; background:#fff; color:#0f172a; }
         .eval-ok { font-size:12.5px; color:var(--gb-strong); font-weight:600; }
+        .banner-extra { margin-top: 6px; font-size: 12.5px; color: var(--gb-strong); }
+        .notice-strip {
+            margin-top: 8px; padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.5;
+            background: var(--gb-tint-warn); border: 1px solid var(--gb-line-warn); border-left: 4px solid var(--gb-amber); color: var(--gb-strong);
+        }
+
+        /* ── Set-up checklist ─────────────────────────────────────── */
+        .setup-card { border-left: 4px solid var(--gb-amber); }
+        .setup-hide { font-size: 12px; font-weight: 600; color: var(--gb-muted); text-decoration: none; }
+        .setup-hide:hover { color: var(--gb-strong); text-decoration: underline; }
+        .setup-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+        .setup-item { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; }
+        .setup-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; background: var(--gb-ui-border); }
+        .setup-dot.on { background: var(--gb-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--gb-ok) 25%, transparent); }
+        .setup-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+        .setup-label { font-weight: 600; color: var(--gb-strong); }
+        .setup-label.done { color: var(--gb-muted); text-decoration: line-through; }
+        .setup-hint { font-size: 12px; color: var(--gb-muted); line-height: 1.45; }
+        .setup-link { flex: 0 0 auto; font-size: 12px; font-weight: 600; color: var(--gb-amber-edge); text-decoration: none; white-space: nowrap; }
+        .setup-link:hover { text-decoration: underline; }
 
         @media (prefers-reduced-motion: reduce) {
             .gbtn, .tab, .seg, .mode-card, .save-bar { transition: none; }
@@ -1547,9 +1629,105 @@ export class FraudPreventionComponent implements OnInit {
     ngOnInit() {
         this.checkClaim(false);
         this.reloadAll();
+        this.loadSetup();
         this.http.get<any>('/fraud-prevention/meta').subscribe({
             next: m => { this.meta = m; this.premiumLocked = !!m && m.tier === 'free'; this.cdr.markForCheck(); },
             error: () => undefined,
+        });
+    }
+
+    /** "So far: 12 risky orders held for review · £1,234.56 of risky orders intercepted". */
+    statsLine(): string {
+        return (this.meta?.recentStats || []).map((s: any) => `${s.value} ${s.label}`).join(' · ');
+    }
+
+    /** A 402, or a licence_required / licence-required / premium-feature body, becomes one
+     *  consistent sentence pointing at the licence banner; anything else keeps its message. */
+    errMsg(e: any, what: string, fallback: string): string {
+        const code = String(e?.error?.error || '');
+        if (e?.status === 402 || ['licence-required', 'licence_required', 'premium-feature'].includes(code)) {
+            return `${what} needs a licence — start the free trial or activate a key at the top of this page.`;
+        }
+        return e?.error?.message || fallback;
+    }
+
+    // ── Set-up checklist (Overview) ──────────────────────────────────
+    private static readonly SETUP_HIDDEN_KEY = 'hulo-vendure-plugin-fraud-prevention-setup-hidden';
+    setup: { items: Array<{ key: string; label: string; done: boolean; hint: string; tab?: string; url?: string }>; complete: boolean } | null = null;
+    setupHidden = false;
+
+    loadSetup() {
+        try { this.setupHidden = localStorage.getItem(FraudPreventionComponent.SETUP_HIDDEN_KEY) === '1'; } catch { this.setupHidden = false; }
+        this.http.get<any>('/fraud-prevention/setup').subscribe({
+            next: s => { this.setup = s; this.cdr.markForCheck(); },
+            error: () => undefined,
+        });
+    }
+
+    /** Hidden only when complete, or when the admin hid it and nothing has come undone since. */
+    setupVisible(): boolean {
+        if (!this.setup || !this.setup.items?.length) return false;
+        if (this.setup.complete) return false;
+        return !this.setupHidden;
+    }
+
+    setupDoneCount(): number { return (this.setup?.items || []).filter(i => i.done).length; }
+
+    hideSetup() {
+        this.setupHidden = true;
+        try { localStorage.setItem(FraudPreventionComponent.SETUP_HIDDEN_KEY, '1'); } catch { /* private mode */ }
+    }
+
+    // ── Weekly report (Settings) ─────────────────────────────────────
+    digest: { enabled: boolean; recipient: string | null; defaultRecipient: string | null; lastSentAt: string | null; nextDueAt: string | null } | null = null;
+    digestRecipient = '';
+    digestBusy = false;
+    digestLoadFailed = false;
+
+    loadDigest() {
+        this.http.get<any>('/fraud-prevention/digest/settings').subscribe({
+            next: d => { this.digest = d; this.digestRecipient = d?.recipient || ''; this.digestLoadFailed = false; this.cdr.markForCheck(); },
+            error: () => { this.digestLoadFailed = true; this.cdr.markForCheck(); },
+        });
+    }
+
+    saveDigest(patch: { enabled?: boolean; recipient?: string | null }) {
+        if (patch.recipient !== undefined) patch.recipient = (patch.recipient || '').trim() || null;
+        this.digestBusy = true;
+        this.http.post<any>('/fraud-prevention/digest/settings', patch).subscribe({
+            next: d => {
+                this.digestBusy = false; this.digest = d; this.digestRecipient = d?.recipient || '';
+                this.notification.success(patch.enabled === false ? 'Weekly report switched off' : 'Weekly report settings saved');
+                this.cdr.markForCheck();
+            },
+            error: e => { this.digestBusy = false; this.notification.error(this.errMsg(e, 'The weekly report', 'Could not save the weekly report settings')); this.loadDigest(); },
+        });
+    }
+
+    sendDigestTest() {
+        this.digestBusy = true;
+        const to = (this.digestRecipient || '').trim() || undefined;
+        this.http.post<any>('/fraud-prevention/digest/send-test', { to }).subscribe({
+            next: r => {
+                this.digestBusy = false;
+                if (r?.sent) this.notification.success(`Sent "${r.subject}" to ${r.to}`);
+                else this.notification.error(r?.reason === 'no-recipient' ? 'No recipient — enter an address above or set the alert email first' : `Not sent: ${r?.reason || 'unknown error'}`);
+                this.cdr.markForCheck();
+            },
+            error: e => { this.digestBusy = false; this.notification.error(this.errMsg(e, 'The weekly report', 'Could not send the test report')); this.cdr.markForCheck(); },
+        });
+    }
+
+    /** Fetched with the admin's own HttpClient (cookie or bearer, whichever the admin uses)
+     *  and opened from a Blob URL, so the preview works regardless of the auth method. */
+    previewDigest() {
+        this.http.get('/fraud-prevention/digest/preview', { responseType: 'text' }).subscribe({
+            next: html => {
+                const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+                window.open(url, '_blank', 'noopener');
+                setTimeout(() => URL.revokeObjectURL(url), 60_000);
+            },
+            error: e => this.notification.error(this.errMsg(e, 'The weekly report preview', 'Could not build the preview')),
         });
     }
 
@@ -1614,7 +1792,7 @@ export class FraudPreventionComponent implements OnInit {
         if (l.trialEndsAt && new Date(l.trialEndsAt).getTime() > Date.now()) {
             return `free trial on the ${l.plan} plan — first charge on ${d(l.trialEndsAt)}; cancel any time before then via Manage billing`;
         }
-        return `${l.plan} subscription — renews automatically${l.expiresAt ? ' (current key valid until ' + d(l.expiresAt) + ')' : ''}`;
+        return `${l.plan} subscription — renews automatically${l.expiresAt ? ' — current key valid until ' + d(l.expiresAt) : ''}`;
     }
     openPortal() {
         this.portalOpening = true;
@@ -1675,11 +1853,11 @@ export class FraudPreventionComponent implements OnInit {
     }
 
     private loadForTab(tab: Tab) {
-        if (tab === 'overview') this.loadStats();
+        if (tab === 'overview') { this.loadStats(); this.loadSetup(); }
         if (tab === 'review') this.loadCases();
         if (tab === 'lists') this.loadLists();
         if (tab === 'activity') this.loadLog();
-        if (tab === 'settings') { this.loadNotif(); this.loadTemplates(); }
+        if (tab === 'settings') { this.loadNotif(); this.loadTemplates(); this.loadDigest(); }
     }
 
     // ── Config ─────────────────────────────────────────────────────
@@ -1687,8 +1865,8 @@ export class FraudPreventionComponent implements OnInit {
 
     setMode(mode: 'off' | 'monitor' | 'enforce') {
         if (!this.current) return;
-        if (mode === 'enforce' && this.meta && !this.meta.licensed) {
-            this.notification.warning('Enforce mode requires a licence — running in monitor until then.');
+        if (mode === 'enforce' && this.premiumLocked) {
+            this.notification.warning('Enforce mode needs a licence — start the free trial or activate a key at the top of this page. Running in monitor until then.');
         }
         this.current.mode = mode;
         this.markDirty();
@@ -1878,7 +2056,7 @@ export class FraudPreventionComponent implements OnInit {
                 }
                 this.cdr.markForCheck();
             },
-            error: err => { this.presetBusy = false; this.notification.error(err?.error?.message || 'Could not add feed'); this.cdr.markForCheck(); },
+            error: err => { this.presetBusy = false; this.notification.error(this.errMsg(err, 'Adding a custom feed', 'Could not add feed')); this.cdr.markForCheck(); },
         });
     }
 
@@ -1924,7 +2102,7 @@ export class FraudPreventionComponent implements OnInit {
                     this.notification.error(r.message || 'Could not add feed');
                 }
             },
-            error: err => this.notification.error(err?.error?.message || 'Could not add feed'),
+            error: err => this.notification.error(this.errMsg(err, 'Adding a custom feed', 'Could not add feed')),
         });
     }
 
@@ -1939,7 +2117,7 @@ export class FraudPreventionComponent implements OnInit {
         this.syncBusy = true;
         this.http.post<any>(`/fraud-prevention/feeds/custom/${f.id}`, { sync: true }).subscribe({
             next: r => { this.syncBusy = false; r.success ? this.notification.success(r.message) : this.notification.error(r.message); this.loadLists(); },
-            error: err => { this.syncBusy = false; this.notification.error(err?.error?.message || 'Sync failed'); },
+            error: err => { this.syncBusy = false; this.notification.error(this.errMsg(err, 'Feed sync', 'Sync failed')); },
         });
     }
 
@@ -1960,7 +2138,7 @@ export class FraudPreventionComponent implements OnInit {
             },
             error: err => {
                 this.syncBusy = false;
-                this.notification.error(err?.error?.message || 'Sync failed');
+                this.notification.error(this.errMsg(err, 'Feed sync', 'Sync failed'));
             },
         });
     }
@@ -1976,7 +2154,7 @@ export class FraudPreventionComponent implements OnInit {
             },
             error: err => {
                 this.syncBusy = false;
-                this.notification.error(err?.error?.message || 'Sync failed');
+                this.notification.error(this.errMsg(err, 'Feed sync', 'Sync failed'));
             },
         });
     }

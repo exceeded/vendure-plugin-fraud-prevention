@@ -5,6 +5,21 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] — 2026-10-11
+
+### Added
+- Weekly report: every Monday at 08:00 server time the plugin emails the previous week's figures (orders risk-scored, held, blocked, value intercepted, review decisions) with the week before for comparison, the next set-up steps and the licence state when it needs attention. Sent through the plugin's SMTP transport (the `smtp` option or `SMTP_*` env) to the recipient set under Settings → Weekly report, else the alert email, `defaultAdminEmail`, the licence customer or the evaluation reminder address. Endpoints `GET/POST fraud-prevention/digest/settings`, `POST fraud-prevention/digest/send-test`, `GET fraud-prevention/digest/preview`; a "Weekly report" card on the Settings tab with Send-me-a-test and Preview. Scheduled on the worker only, once per install across processes.
+- Set-up checklist at the top of the Overview tab (`GET fraud-prevention/setup`): scoring on for a channel, enforce on for a channel, alert email set, threat feeds synced in the last 7 days, first review case worked — real checks, each linking to the tab where it is done. Hideable per browser; returns if an item comes undone.
+- Admin navigation entry **Sales → Fraud Prevention** and a dashboard widget (Dashboard → Add widget → Fraud Prevention, `GET fraud-prevention/widget`): orders scored, risky orders intercepted and value intercepted for the last 7 days, plus the licence notice. Both are registered by the new shared `FraudPreventionNavModule` in `uiExtensions`.
+- Overview tiles "Risky orders intercepted" and "£ value intercepted" (last 30 days; `stats.intercepted30`), the latter summing the Vendure order totals behind every review case.
+- `meta` now carries `notice` (trial/key about to end), `premiumFeatures` and `recentStats` (top three non-zero 30-day figures). The licence banners show the lifecycle notice in an amber strip, the premium feature list on the trial and free tiers, and a "So far: …" line from the recent figures; the licensed banner reads "renews automatically — current key valid until <date>" for subscriptions.
+- Usage figures reported to the licence server now cover the last 30 days and include `ordersAssessed`, `ordersHeld`, `ordersBlocked`, `riskyValuePence`, `casesApproved` and `casesRejected`; licensed installs keep reporting through the daily heartbeat (SDK 0.15.0 `Heartbeat.setStatsProvider`).
+
+### Changed
+- `@huloglobal/vendure-licence-sdk` `^0.15.0`.
+- The 402 responses on the feed endpoints keep `error: 'licence_required'` and add `buyUrl`. In the admin UI any 402 (or a `licence_required` / `premium-feature` body) is shown as "<action> needs a licence — start the free trial or activate a key at the top of this page" instead of the raw message; switching to Enforce on the free tier says the same.
+- "Email me before it ends" validates the address, times out after 8 s and remembers the address (shared `hulo_plugin_prefs` table, key `eval.leadEmail`) as the weekly report's last-resort recipient.
+
 ## [0.19.2] — 2026-09-28
 
 ### Added

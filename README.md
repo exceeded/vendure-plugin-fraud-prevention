@@ -154,13 +154,67 @@ plugins: [
 ],
 ```
 
-Admin UI (multi-tab dashboard: Overview, Rules, Review queue, Lists, Simulate,
-Activity, Settings):
+### Admin UI
 
 ```ts
 // in your compileUiExtensions extensions array:
 FraudPreventionPlugin.uiExtensions,
 ```
+
+This registers three things:
+
+- **Sales → Fraud Prevention** in the admin navigation, opening the multi-tab
+  dashboard (Overview, Rules, Review queue, Lists, Simulate, Activity, Settings).
+  It needs the `ReadCatalog` permission, the same as the page's read endpoints.
+- A **fraud panel on every order-detail page** showing the score, the signals
+  that fired and the review case, if any.
+- A **dashboard widget** — Dashboard → Add widget → **Fraud Prevention** —
+  with the last seven days' figures (orders scored, risky orders intercepted,
+  value intercepted) and a link to the page.
+
+## Weekly report, setup checklist and dashboard widget
+
+**Weekly report.** Every Monday at 08:00 (server-local time) the plugin emails
+a short report covering the previous seven days, with the week before for
+comparison: orders risk-scored, orders held for review, orders blocked, the
+value of the orders intercepted (the Vendure order totals behind every review
+case), and review cases approved and rejected. Below the figures it lists up
+to three next steps taken from the set-up checklist, the licence state when
+something needs attention (a trial or key about to end), and a link to the
+admin page. Nothing is reported that is not counted in the plugin's own
+tables — a quiet week says so.
+
+The report goes to the first of: the recipient entered under **Settings →
+Weekly report**; the alert address under **Settings → Notifications → Email**;
+the `defaultAdminEmail` option; the licence's customer email; the address given
+to "Email me before it ends" during the evaluation. The card shows which
+address applies ("Defaults to …"), when the last report went out and when the
+next is due, and has **Send me a test** and **Preview** buttons. Untick *Send
+the weekly report* to stop it. One report is sent per install, however many
+server or worker processes run; the scheduler runs on the worker.
+
+It uses the same SMTP transport as the fraud alerts — the `smtp` option, or
+the `SMTP_SERVER` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM`
+environment variables. With no SMTP configured the report is silently off and
+"Send me a test" says why.
+
+**Setup checklist.** The Overview tab opens with a checklist of real checks
+against the configuration: scoring switched on for a channel, enforce mode on
+at least one channel, an alert email set, threat feeds synced in the last
+seven days, and a first review case worked. Each row links to the tab where it
+is done. **Hide** keeps it out of the way (remembered in the browser); it
+disappears for good once everything is done and comes back if something
+becomes undone. The same items supply the weekly report's next steps.
+
+**Dashboard widget.** Dashboard → Add widget → **Fraud Prevention**. Three
+seven-day figures, the licence notice when one applies, and an "Open Fraud
+Prevention" link. Supported widths: 4, 6 and 8 columns.
+
+**Usage figures sent to HULO.** The same six counters (last 30 days, numbers
+only, no customer data) ride along with the daily heartbeat and, during the
+evaluation, with the evaluation check-in, so renewal and reminder emails can
+say what the plugin did for the store. `HULO_HEARTBEAT_DISABLED=true` stops
+the heartbeat entirely.
 
 ### Holding fulfilment on pending cases
 

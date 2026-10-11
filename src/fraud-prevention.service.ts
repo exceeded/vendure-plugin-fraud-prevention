@@ -1,4 +1,8 @@
-import { LicenceStore, adapterFor, PurchaseClaimClient } from '@huloglobal/vendure-licence-sdk';
+import {
+    LicenceStore, adapterFor, PurchaseClaimClient, PluginPrefs, WeeklyDigest, composeDigest, formatStat,
+    smtpTransportFromEnv, describeLicence, licenceLifecycleNotice,
+    DigestMail, DigestStat, DigestTip, EvaluationState, LicenceStatus, WeeklyDigestSettings,
+} from '@huloglobal/vendure-licence-sdk';
 import { createHash } from 'crypto';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import {
@@ -45,6 +49,62 @@ import { fanOutOpsEvent, OpsEvent } from './ops-notify';
 const loggerCtx = 'FraudPrevention';
 /** Postgres advisory-lock key for the feed sync (any fixed 64-bit value; 'HULOFEED' as bytes). */
 const FEED_SYNC_LOCK_KEY = '5211883387260327236';
+
+/** Package short id (npm name without the scope) — pref namespace, buy URL, digest id. */
+export const SHORT_ID = 'vendure-plugin-fraud-prevention';
+export const PLUGIN_DISPLAY_NAME = 'Fraud Prevention';
+export const BUY_URL = `https://elite.charity/licence/buy/${SHORT_ID}`;
+/** What the free tier loses — shown on the trial/free banners, the widget and the weekly report. */
+export const PREMIUM_FEATURES = [
+    'Enforce mode (auto-hold risky orders)',
+    'Review queue with one-click approve/reject',
+    'Threat feeds and custom blocklists',
+    'Email and chat alerts',
+];
+
+/** Usage counters for one period. Numbers only, never personal data: they go to the
+ *  licence server (evaluation + heartbeat) and into the weekly report. */
+export interface UsageStats {
+    ordersAssessed: number;
+    ordersHeld: number;
+    ordersBlocked: number;
+    riskyValuePence: number;
+    casesApproved: number;
+    casesRejected: number;
+}
+
+const STAT_LABELS: Array<{ key: keyof UsageStats; label: string; format?: 'count' | 'pence' }> = [
+    { key: 'ordersHeld', label: 'risky orders held for review' },
+    { key: 'ordersBlocked', label: 'high-risk orders blocked' },
+    { key: 'riskyValuePence', label: 'of risky orders intercepted', format: 'pence' },
+    { key: 'ordersAssessed', label: 'orders risk-scored' },
+    { key: 'casesApproved', label: 'review cases approved' },
+    { key: 'casesRejected', label: 'review cases rejected' },
+];
+
+/** Shape usage counters as digest rows (label + format), in headline order. */
+export function toDigestStats(current: UsageStats, previous?: UsageStats | null): DigestStat[] {
+    return STAT_LABELS.map(s => ({
+        key: s.key, label: s.label, value: Number(current[s.key] || 0),
+        previous: previous ? Number(previous[s.key] || 0) : undefined,
+        format: s.format || 'count',
+    }));
+}
+
+export interface SetupItem {
+    key: string;
+    label: string;
+    done: boolean;
+    hint: string;
+    tab?: string;
+    url?: string;
+}
+
+/** Hooks the plugin class supplies so this file never imports it (static plugin<->service cycle). */
+export interface DigestHooks {
+    licenceStatus: () => LicenceStatus | null;
+    evalState: () => EvaluationState | null;
+}
 
 export interface AssessInput {
     channelId: number;
@@ -105,6 +165,7 @@ export class FraudPreventionService implements OnModuleInit {
         } catch (e: any) {
             Logger.error(`Schema init failed: ${e.message}`, loggerCtx);
         }
+        await this.prefs.ensureTable();
     }
 
     private get db() {
@@ -112,6 +173,10 @@ export class FraudPreventionService implements OnModuleInit {
     }
 
     private licenceStore = new LicenceStore((sql, params) => this.db.query(sql, params));
+    /** Small per-plugin settings (weekly-report recipient, trial lead email) in the
+     *  shared `hulo_plugin_prefs` table. */
+    private prefs = new PluginPrefs((sql, params, opts) => this.db.query(sql, params, opts), SHORT_ID);
+    getPrefs(): PluginPrefs { return this.prefs; }
 
     // Buy-from-admin auto-install (hooks are supplied by the controller so
     // this file never imports the plugin class).
@@ -137,11 +202,185 @@ export class FraudPreventionService implements OnModuleInit {
         await this.licenceStore.clear('vendure-plugin-fraud-prevention');
     }
 
-    /** Anonymous usage aggregates for the evaluation drip (numbers only). */
+    /** Anonymous usage aggregates for the evaluation drip and the daily heartbeat
+     *  (numbers only, last 30 days). Licensed installs keep reporting after purchase
+     *  so renewal and win-back emails can say what the plugin did. */
     async evalStats(): Promise<Record<string, number>> {
-        const [held] = await this.db.query(`SELECT COUNT(*) AS n FROM fraud_blocked_orders`);
-        const [blocked] = await this.db.query(`SELECT COUNT(*) AS n FROM fraud_blocked_orders WHERE riskLevel = 'blocked'`);
-        return { ordersHeld: Number(held?.n || 0), ordersBlocked: Number(blocked?.n || 0) };
+        const to = new Date();
+        const from = new Date(to.getTime() - 30 * 86_400_000);
+        return { ...(await this.usageStats(from, to)) };
+    }
+
+    /**
+     * Usage counters for the window `[from, to)`. Held/blocked/assessed come from the
+     * assessment log (what the Overview tiles count); the intercepted value is the sum
+     * of the Vendure order totals behind every review case opened in the window; the
+     * case decisions count by when they were reviewed. Each query fails soft to zero.
+     */
+    async usageStats(from: Date, to: Date): Promise<UsageStats> {
+        const zero: UsageStats = { ordersAssessed: 0, ordersHeld: 0, ordersBlocked: 0, riskyValuePence: 0, casesApproved: 0, casesRejected: 0 };
+        const [log] = await this.db.query(
+            `SELECT COUNT(*) AS assessed,
+                    SUM(CASE WHEN action = 'review' THEN 1 ELSE 0 END) AS held,
+                    SUM(CASE WHEN action = 'block' THEN 1 ELSE 0 END) AS blocked
+             FROM fraud_log WHERE createdAt >= ? AND createdAt < ?
+               AND action IN ('allow','flag','review','block')`,
+            [from, to],
+        ).catch(() => [null]);
+        const [risky] = await this.db.query(
+            `SELECT COALESCE(SUM(o.\`totalWithTax\`), 0) AS pence
+             FROM fraud_blocked_orders bo JOIN \`order\` o ON o.id = bo.orderId
+             WHERE bo.createdAt >= ? AND bo.createdAt < ?`,
+            [from, to],
+        ).catch(() => [null]);
+        const [cases] = await this.db.query(
+            `SELECT SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
+                    SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+             FROM fraud_blocked_orders WHERE reviewedAt >= ? AND reviewedAt < ?`,
+            [from, to],
+        ).catch(() => [null]);
+        if (!log && !risky && !cases) return zero;
+        return {
+            ordersAssessed: Number(log?.assessed || 0),
+            ordersHeld: Number(log?.held || 0),
+            ordersBlocked: Number(log?.blocked || 0),
+            riskyValuePence: Math.round(Number(risky?.pence || 0)),
+            casesApproved: Number(cases?.approved || 0),
+            casesRejected: Number(cases?.rejected || 0),
+        };
+    }
+
+    /** Top three non-zero 30-day figures, formatted, for the licence banner ("So far: …"). */
+    async recentStats(): Promise<Array<{ label: string; value: string }>> {
+        const to = new Date();
+        const rows = toDigestStats(await this.usageStats(new Date(to.getTime() - 30 * 86_400_000), to));
+        return rows.filter(s => s.value > 0).slice(0, 3).map(s => ({ label: s.label, value: formatStat(s) }));
+    }
+
+    // ── Setup checklist ────────────────────────────────────────────────
+    /** Real checks against the live configuration and tables. The same items drive the
+     *  digest's "next steps". `premium` marks what the free tier cannot complete. */
+    async setupChecklist(premium: boolean): Promise<{ items: SetupItem[]; complete: boolean }> {
+        const configs = await this.getAllConfigs().catch(() => [] as FraudChannelConfig[]);
+        const modeOn = configs.some(c => c.enabled && c.mode !== 'off');
+        const enforceOn = configs.some(c => c.enabled && c.mode === 'enforce');
+        const notif = await this.getNotificationConfig().catch(() => ({ adminEmail: '' }));
+        const [feed] = await this.db.query(`SELECT MAX(syncedAt) AS last FROM fraud_feed_state`).catch(() => [null]);
+        const lastSync = feed?.last ? new Date(feed.last).getTime() : 0;
+        const feedsFresh = lastSync > Date.now() - 7 * 86_400_000;
+        const worked = await this.db.query(
+            `SELECT id FROM fraud_blocked_orders WHERE status IN ('approved', 'rejected') LIMIT 1`,
+        ).catch(() => []);
+        const base = (this.options.publicBaseUrl || '').replace(/\/$/, '');
+        const url = base ? `${base}/admin/extensions/fraud-prevention` : undefined;
+        const items: SetupItem[] = [
+            { key: 'mode', label: 'Scoring switched on for a channel', done: modeOn, tab: 'rules', url,
+              hint: 'Pick Monitor or Enforce under Rules. Off means orders are scored in the background but nothing is logged or held.' },
+            { key: 'enforce', label: 'Enforce mode on at least one channel', done: enforceOn, tab: 'rules', url,
+              hint: `Monitor only logs what it sees. Enforce holds risky orders in the review queue until you approve them${premium ? '' : ' — needs a licence or the evaluation'}.` },
+            { key: 'alertEmail', label: 'Alert email set', done: !!notif.adminEmail, tab: 'settings', url,
+              hint: 'Under Settings → Notifications → Email, enter the address that should hear about held orders (needs SMTP on the server).' },
+            { key: 'feeds', label: 'Threat feeds synced in the last 7 days', done: feedsFresh, tab: 'lists', url,
+              hint: `Press "Sync all now" under Lists; afterwards the feeds refresh nightly at 03:00${premium ? '' : ' — needs a licence or the evaluation'}.` },
+            { key: 'firstCase', label: 'First review case worked', done: worked.length > 0, tab: 'review', url,
+              hint: 'Approve or reject a held order in the Review queue. Approve releases it; reject cancels and refunds it in Vendure.' },
+        ];
+        return { items, complete: items.every(i => i.done) };
+    }
+
+    // ── Weekly report ──────────────────────────────────────────────────
+    private digest: WeeklyDigest | null = null;
+    private digestHooks: DigestHooks | null = null;
+
+    /** Wire the weekly report (hooks come from the plugin class). Idempotent. */
+    initDigest(hooks: DigestHooks): WeeklyDigest {
+        if (this.digest) return this.digest;
+        this.digestHooks = hooks;
+        this.digest = new WeeklyDigest({
+            pluginId: SHORT_ID,
+            pluginName: PLUGIN_DISPLAY_NAME,
+            prefs: this.prefs,
+            collect: (from, to) => this.collectDigest(from, to),
+            send: (to, mail) => this.sendDigestMail(to, mail),
+            defaultRecipient: () => this.defaultDigestRecipient(),
+        });
+        return this.digest;
+    }
+
+    /** Worker only — the caller checks ProcessContext. */
+    startDigest(): void { this.digest?.start(); }
+
+    async digestSettings(): Promise<WeeklyDigestSettings | null> { return this.digest ? this.digest.settings() : null; }
+    async updateDigestSettings(patch: { enabled?: boolean; recipient?: string | null }): Promise<WeeklyDigestSettings | null> {
+        return this.digest ? this.digest.updateSettings(patch) : null;
+    }
+    async sendDigestNow(to?: string | null) { return this.digest ? this.digest.sendNow(to) : null; }
+
+    /** This week's report rendered without sending (admin "Preview"). */
+    async previewDigest(): Promise<DigestMail> {
+        const periodEnd = new Date();
+        const periodStart = new Date(periodEnd.getTime() - 7 * 86_400_000);
+        const partial = await this.collectDigest(periodStart, periodEnd);
+        return composeDigest({ ...partial, pluginName: PLUGIN_DISPLAY_NAME, shortId: SHORT_ID, periodStart, periodEnd });
+    }
+
+    /** Tier exactly as `meta` computes it: a valid licence is paid, an active evaluation is trial. */
+    effectiveTier(): 'paid' | 'trial' | 'free' {
+        const status = this.digestHooks?.licenceStatus() ?? null;
+        if (status?.valid) return 'paid';
+        return this.digestHooks?.evalState()?.active ? 'trial' : 'free';
+    }
+
+    private async collectDigest(from: Date, to: Date) {
+        const current = await this.usageStats(from, to);
+        const previous = await this.usageStats(new Date(from.getTime() - (to.getTime() - from.getTime())), from);
+        const tier = this.effectiveTier();
+        const checklist = await this.setupChecklist(tier !== 'free').catch(() => ({ items: [] as SetupItem[], complete: true }));
+        const tips: DigestTip[] = checklist.items.filter(i => !i.done).slice(0, 3)
+            .map(i => ({ title: i.label, body: i.hint, url: i.url }));
+        const base = (this.options.publicBaseUrl || '').replace(/\/$/, '');
+        return {
+            stats: toDigestStats(current, previous),
+            tips,
+            tier,
+            licence: describeLicence(this.digestHooks?.licenceStatus() ?? null),
+            evalState: this.digestHooks?.evalState() ?? null,
+            adminUrl: base ? `${base}/admin/extensions/fraud-prevention` : null,
+            premiumFeatures: PREMIUM_FEATURES,
+        };
+    }
+
+    /** The plugin's own SMTP transport (smtp option / SMTP_* env), else the SDK env
+     *  transport. Throws when neither exists so "Send me a test" can say why. */
+    private async sendDigestMail(to: string, mail: DigestMail): Promise<void> {
+        const smtp = this.smtpSettings();
+        if (smtp) {
+            await this.sendWithDeadline({ from: smtp.from, to, subject: mail.subject, text: mail.text, html: mail.html });
+            return;
+        }
+        const env = smtpTransportFromEnv();
+        if (!env) throw new Error('SMTP is not configured — set the plugin smtp option or SMTP_SERVER/SMTP_USER/SMTP_PASSWORD');
+        await env.sendMail({ to, subject: mail.subject, text: mail.text, html: mail.html });
+    }
+
+    /** Configured alert address → defaultAdminEmail option → licence customer → trial lead. */
+    private async defaultDigestRecipient(): Promise<string | null> {
+        const rows = await this.db.query(`SELECT adminEmail FROM fraud_notification_config LIMIT 1`).catch(() => []);
+        const configured = String(rows?.[0]?.adminEmail || '').trim();
+        if (configured) return configured;
+        if (this.options.defaultAdminEmail) return this.options.defaultAdminEmail;
+        const customer = describeLicence(this.digestHooks?.licenceStatus() ?? null)?.customer;
+        if (customer) return customer;
+        return this.prefs.get('eval.leadEmail');
+    }
+
+    /** Licence-lifecycle sentence for the banner / widget (null when nothing needs saying). */
+    lifecycleNotice() {
+        return licenceLifecycleNotice(
+            describeLicence(this.digestHooks?.licenceStatus() ?? null),
+            this.digestHooks?.evalState() ?? null,
+            SHORT_ID,
+        );
     }
 
     // ── Schema ──────────────────────────────────────────────────────────
@@ -1177,11 +1416,15 @@ export class FraudPreventionService implements OnModuleInit {
              WHERE \`orderPlacedAt\` > DATE_SUB(NOW(), INTERVAL 24 HOUR) AND \`customFieldsIp\` IS NOT NULL AND \`customFieldsIp\` <> ''
              GROUP BY \`customFieldsIp\` ORDER BY n DESC LIMIT 8`,
         );
+        // Value metrics for the Overview tiles: always the trailing 30 days, whatever `days` the chart uses.
+        const now = new Date();
+        const last30 = await this.usageStats(new Date(now.getTime() - 30 * 86_400_000), now);
         return {
             totals: totals || {}, daily, byLevel: topSignals,
             pendingCases: Number(pending?.n || 0),
             orders24: orders24 || {}, failedPayments24: Number(failed24?.n || 0),
             topIps,
+            intercepted30: { held: last30.ordersHeld, blocked: last30.ordersBlocked, riskyValuePence: last30.riskyValuePence },
         };
     }
 

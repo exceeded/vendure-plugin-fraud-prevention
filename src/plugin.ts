@@ -1,4 +1,4 @@
-import { PluginCommonModule, Type, VendurePlugin } from '@vendure/core';
+import { PluginCommonModule, ProcessContext, Type, VendurePlugin } from '@vendure/core';
 import {
     fingerprintPublicKey,
     Heartbeat,
@@ -102,6 +102,7 @@ export class FraudPreventionPlugin {
             FraudPreventionPlugin.evalClientInternal.start();
         } else {
             FraudPreventionPlugin.evalClientInternal = new EvaluationClient({ packageName: PKG_NAME, packageVersion: PKG_VERSION });
+            if (FraudPreventionPlugin.statsProvider) FraudPreventionPlugin.evalClientInternal.setStatsProvider(FraudPreventionPlugin.statsProvider);
             FraudPreventionPlugin.evalClientInternal.start();
         }
     }
@@ -112,14 +113,29 @@ export class FraudPreventionPlugin {
         }
     }
 
-    constructor(private service: FraudPreventionService) {
-        // Anonymous aggregates for the (opt-in) evaluation reminder emails.
-        FraudPreventionPlugin.evalClientInternal?.setStatsProvider(() => service.evalStats());
+    /** Usage-stats provider shared by the evaluation client and the heartbeat, kept so
+     *  an evaluation client created later (key deactivated at runtime) gets it too. */
+    private static statsProvider: (() => Promise<Record<string, number>>) | null = null;
+
+    constructor(private service: FraudPreventionService, private processContext: ProcessContext) {
+        // Anonymous 30-day aggregates (numbers only) for the evaluation reminder emails
+        // and, after purchase, the daily heartbeat — so renewal and win-back emails can
+        // say what the plugin did for the store.
+        FraudPreventionPlugin.statsProvider = () => service.evalStats();
+        FraudPreventionPlugin.evalClientInternal?.setStatsProvider(FraudPreventionPlugin.statsProvider);
+        FraudPreventionPlugin.heartbeat?.setStatsProvider(FraudPreventionPlugin.statsProvider);
+        // Weekly "what Fraud Prevention did for you" report — tier/licence come from here.
+        service.initDigest({
+            licenceStatus: () => FraudPreventionPlugin.getLicenceStatus(),
+            evalState: () => FraudPreventionPlugin.getEvalState(),
+        });
     }
 
     /** Apply an admin-activated licence key persisted in the DB. Runs
-     *  after DI is up; an explicitly configured env/init key wins. */
+     *  after DI is up; an explicitly configured env/init key wins. The
+     *  weekly report scheduler starts here, on the worker only. */
     async onApplicationBootstrap() {
+        if (this.processContext.isWorker) this.service.startDigest();
         if (FraudPreventionPlugin.isLicensed()) return;
         const stored = await this.service.loadStoredLicenceKey();
         if (stored) {
@@ -210,6 +226,11 @@ export class FraudPreventionPlugin {
                 type: 'shared' as const,
                 ngModuleFileName: 'order-fraud-shared.module.ts',
                 ngModuleName: 'OrderFraudSharedModule',
+            },
+            {
+                type: 'shared' as const,
+                ngModuleFileName: 'fraud-prevention-nav.module.ts',
+                ngModuleName: 'FraudPreventionNavModule',
             },
         ],
     };
